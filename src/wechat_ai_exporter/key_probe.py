@@ -6,6 +6,7 @@ from ctypes import wintypes
 import hashlib
 from pathlib import Path
 import platform
+import re
 import struct
 import time
 from typing import Callable, Iterator
@@ -21,6 +22,21 @@ TH32CS_SNAPMODULE32 = 0x00000010
 MAX_DLL_SIZE = 512 * 1024 * 1024
 MAX_REMOTE_STRING = 1024
 CFG_LANDMARK = b"global_config"
+EXACT_SALT_CONFIG_MARKER = b"com.Tencent.WCDB.Config.Cipher"
+# The serialized key+salt form was identified with help from the MIT-licensed
+# weflow-cli project; this adapter deliberately follows an exact registration
+# node instead of adopting its general key-pattern memory scan.
+CONFIG_CIPHER_XOR_MASK = bytes.fromhex(
+    "d2c7442458020000004889442450488b"
+    "450048844c2448488944254048584c24"
+)
+EXACT_SALT_SCAN_CHUNK = 1024 * 1024
+MAX_EXACT_SALT_SCAN_BYTES = 1024 * 1024 * 1024
+MEM_COMMIT = 0x1000
+MEM_PRIVATE = 0x20000
+MEM_MAPPED = 0x40000
+PAGE_GUARD = 0x100
+READABLE_PAGE_PROTECTIONS = {0x02, 0x04, 0x20, 0x40, 0x80}
 
 # These signatures and structure offsets are adapted from the Apache-2.0
 # wechatauto-replica project. They are deliberately treated as version adapters,
@@ -55,6 +71,10 @@ SUPPORTED_ADAPTERS = (
     MasterKeyAdapter("weixin-4.1.12-current", 0x138),
     MasterKeyAdapter("weixin-4.1.10-legacy", 0x130),
 )
+EXACT_SALT_ADAPTER = "weixin-4.1.13.12-exact-salt-config"
+READ_ONLY_PROBE_ADAPTER_NAMES = tuple(
+    item.name for item in SUPPORTED_ADAPTERS
+) + (EXACT_SALT_ADAPTER,)
 
 
 @dataclass(frozen=True)
@@ -143,6 +163,19 @@ class _MODULEINFO(ctypes.Structure):
         ("lpBaseOfDll", ctypes.c_void_p),
         ("SizeOfImage", wintypes.DWORD),
         ("EntryPoint", ctypes.c_void_p),
+    ]
+
+
+class _MEMORY_BASIC_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BaseAddress", ctypes.c_void_p),
+        ("AllocationBase", ctypes.c_void_p),
+        ("AllocationProtect", wintypes.DWORD),
+        ("PartitionId", wintypes.WORD),
+        ("RegionSize", ctypes.c_size_t),
+        ("State", wintypes.DWORD),
+        ("Protect", wintypes.DWORD),
+        ("Type", wintypes.DWORD),
     ]
 
 
@@ -304,6 +337,164 @@ def _remote_std_string(read: Callable[[int, int], bytes | None], address: int,
     return data if binary else data.decode("utf-8", "replace")
 
 
+def _version_from_module_path(path: Path) -> tuple[int, int, int, int] | None:
+    for part in reversed(path.parts):
+        if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", part):
+            values = tuple(int(value) for value in part.split("."))
+            return values if len(values) == 4 else None
+    return None
+
+
+def _file_contains(path: Path, marker: bytes) -> bool:
+    carry = b""
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(EXACT_SALT_SCAN_CHUNK):
+                combined = carry + chunk
+                if marker in combined:
+                    return True
+                carry = combined[-max(0, len(marker) - 1):]
+    except OSError:
+        return False
+    return False
+
+
+def _exact_salt_keys_from_bytes(data: bytes, salt: bytes) -> Iterator[bytearray]:
+    if len(salt) != 16:
+        return
+    ascii_pattern = re.compile(
+        rb"x'([0-9a-fA-F]{64})" + re.escape(salt.hex().encode("ascii")) + rb"'"
+    )
+    for match in ascii_pattern.finditer(data):
+        try:
+            yield bytearray.fromhex(match.group(1).decode("ascii"))
+        except ValueError:
+            continue
+
+
+def _process_memory_hits(pid: int, needle: bytes, deadline: float,
+                         byte_budget: int = MAX_EXACT_SALT_SCAN_BYTES
+                         ) -> Iterator[int]:
+    if not needle:
+        return
+    handle, read = _open_reader(pid)
+    k32 = _kernel32()
+    k32.VirtualQueryEx.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p,
+        ctypes.POINTER(_MEMORY_BASIC_INFORMATION), ctypes.c_size_t,
+    ]
+    k32.VirtualQueryEx.restype = ctypes.c_size_t
+    scanned = 0
+    address = 0x10000
+    maximum = 0x7FFFFFFFFFFF
+    overlap = len(needle) - 1
+    try:
+        while address < maximum and scanned < byte_budget:
+            if time.monotonic() > deadline:
+                return
+            info = _MEMORY_BASIC_INFORMATION()
+            if not k32.VirtualQueryEx(
+                handle, ctypes.c_void_p(address), ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                return
+            region_start = int(info.BaseAddress or 0)
+            region_size = int(info.RegionSize or 0)
+            next_address = region_start + region_size
+            if next_address <= address:
+                return
+            address = next_address
+            protection = int(info.Protect) & 0xFF
+            if (
+                int(info.State) != MEM_COMMIT
+                or int(info.Type) not in {MEM_PRIVATE, MEM_MAPPED}
+                or int(info.Protect) & PAGE_GUARD
+                or protection not in READABLE_PAGE_PROTECTIONS
+                or region_size <= 0
+            ):
+                continue
+            cursor = region_start
+            end = region_start + region_size
+            carry = b""
+            while cursor < end and scanned < byte_budget:
+                if time.monotonic() > deadline:
+                    return
+                length = min(EXACT_SALT_SCAN_CHUNK, end - cursor, byte_budget - scanned)
+                if length <= 0:
+                    return
+                chunk_start = cursor
+                chunk = read(cursor, length)
+                scanned += length
+                cursor += length
+                if chunk is None:
+                    carry = b""
+                    continue
+                combined = carry + chunk
+                combined_start = chunk_start - len(carry)
+                hit_start = 0
+                while True:
+                    hit = combined.find(needle, hit_start)
+                    if hit < 0:
+                        break
+                    yield combined_start + hit
+                    hit_start = hit + 1
+                carry = combined[-overlap:] if overlap else b""
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _candidate_wcdb_config_keys(pid: int, first_page: bytes,
+                                deadline: float) -> Iterator[bytearray]:
+    module = _weixin_module(pid)
+    if module is None:
+        return
+    base, module_size, dll_path = module
+    if (
+        _version_from_module_path(dll_path) != (4, 1, 13, 12)
+        or not _file_contains(dll_path, EXACT_SALT_CONFIG_MARKER)
+    ):
+        return
+    handle, read = _open_reader(pid)
+    try:
+        image = read(base, module_size)
+        if image is None:
+            return
+        marker_hit = image.find(EXACT_SALT_CONFIG_MARKER)
+        if marker_hit < 0:
+            return
+        marker_address = base + marker_hit
+        pair = struct.pack("<QQ", marker_address, len(EXACT_SALT_CONFIG_MARKER))
+    finally:
+        _kernel32().CloseHandle(handle)
+
+    pair_hits = list(_process_memory_hits(pid, pair, deadline))
+    handle, read = _open_reader(pid)
+    try:
+        for pair_address in pair_hits:
+            node = read(pair_address - 0x10, 0x50)
+            if node is None or len(node) != 0x50:
+                continue
+            config_ptr = struct.unpack_from("<Q", node, 0x28)[0]
+            if not 0x10000 <= config_ptr < 0x800000000000:
+                continue
+            obj = read(config_ptr + 0x88, 0x28)
+            if obj is None or len(obj) != 0x28:
+                continue
+            data_ptr = struct.unpack_from("<Q", obj, 0x08)[0]
+            data_len = struct.unpack_from("<Q", obj, 0x10)[0]
+            if not (0 < data_len <= 1024 and 0x10000 <= data_ptr < 0x800000000000):
+                continue
+            blob = read(data_ptr, int(data_len))
+            if blob is None or len(blob) != data_len:
+                continue
+            decoded = bytes(
+                value ^ CONFIG_CIPHER_XOR_MASK[index % len(CONFIG_CIPHER_XOR_MASK)]
+                for index, value in enumerate(blob)
+            )
+            yield from _exact_salt_keys_from_bytes(decoded, first_page[:16])
+    finally:
+        _kernel32().CloseHandle(handle)
+
+
 def _landmark_offsets(image: bytes) -> Iterator[int]:
     start = 0
     while True:
@@ -422,6 +613,21 @@ def probe_database_key(database: Path, *, authorized: bool,
                             wipe_key(image_key)
             if time.monotonic() > deadline:
                 raise ProbeError("The bounded read-only scan reached its time limit without a verified key.")
+    if not derive_media_key:
+        for pid in pids:
+            for candidate in _candidate_wcdb_config_keys(pid, first_page, deadline):
+                accepted = False
+                try:
+                    accepted = verify_first_page(candidate, first_page, WEIXIN4)
+                    if accepted:
+                        return ProbeResult(candidate, EXACT_SALT_ADAPTER, pid, 0)
+                finally:
+                    if not accepted:
+                        wipe_key(candidate)
+            if time.monotonic() > deadline:
+                raise ProbeError(
+                    "The bounded read-only scan reached its time limit without a verified key."
+                )
     raise ProbeError(
         "No supported adapter produced a key that validates the selected database. "
         "This WeChat build may need a new read-only adapter."

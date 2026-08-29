@@ -73,7 +73,7 @@ def build(output: Path) -> list[Path]:
         "network_required": False,
         "wechat_process_modified": False,
         "native_hook_bundled": False,
-        "live_validated_weixin_versions": ["4.1.12.55"],
+        "live_validated_weixin_versions": ["4.1.12.55", "4.1.13.12"],
         "additional_read_only_adapters": ["4.1.10"],
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     primary = [skill_zip, source_zip, readme, release_info, *copied_scripts]

@@ -9,7 +9,9 @@ from wechat_ai_exporter.cli import main
 from wechat_ai_exporter.key_probe import (
     MASTER_DLL_PATTERN, MASTER_DLL_VERIFY, ProbeError, ProbeResult,
     derive_database_key, derive_image_key, extract_xor_material,
-    probe_database_key, _landmark_offsets, _owner_pointer_address,
+    probe_database_key, _candidate_wcdb_config_keys, _exact_salt_keys_from_bytes,
+    _landmark_offsets,
+    _owner_pointer_address, _version_from_module_path, EXACT_SALT_ADAPTER,
     MasterKeyAdapter, wait_for_manual_weixin_exit,
 )
 from wechat_ai_exporter.key_validation import PAGE_SIZE, SALT_SIZE, WEIXIN4, verify_first_page
@@ -69,6 +71,54 @@ class KeyProbeTests(unittest.TestCase):
         self.assertEqual(len(key), 16)
         self.assertEqual(xor_key, 0x78)
         self.assertEqual((key, xor_key), derive_image_key(0x12345678, "wxid_test"))
+
+    def test_exact_salt_config_parser_is_database_specific(self) -> None:
+        salt = bytes(range(16))
+        key = bytes(range(32))
+        serialized = b'prefix x\'' + key.hex().encode() + salt.hex().encode() + b"' suffix"
+        found = list(_exact_salt_keys_from_bytes(serialized, salt))
+        self.assertEqual([bytes(item) for item in found], [key])
+        self.assertEqual(list(_exact_salt_keys_from_bytes(serialized, bytes(reversed(salt)))), [])
+
+        utf16 = ("x'" + key.hex() + salt.hex() + "'").encode("utf-16le")
+        self.assertEqual(list(_exact_salt_keys_from_bytes(utf16, salt)), [])
+        raw = b"prefix" + key + salt + b"suffix"
+        self.assertEqual(list(_exact_salt_keys_from_bytes(raw, salt)), [])
+
+    def test_exact_salt_adapter_is_gated_to_verified_build(self) -> None:
+        self.assertEqual(
+            _version_from_module_path(Path(r"C:\\Weixin\\4.1.13.12\\Weixin.dll")),
+            (4, 1, 13, 12),
+        )
+        self.assertNotEqual(
+            _version_from_module_path(Path(r"C:\\Weixin\\4.1.14.1\\Weixin.dll")),
+            (4, 1, 13, 12),
+        )
+        with mock.patch(
+            "wechat_ai_exporter.key_probe._weixin_module",
+            return_value=(0x100000, 1024, Path(r"C:\\Weixin\\4.1.14.1\\Weixin.dll")),
+        ), mock.patch("wechat_ai_exporter.key_probe._process_memory_hits") as scan:
+            self.assertEqual(
+                list(_candidate_wcdb_config_keys(123, b"x" * PAGE_SIZE, 10**12)), []
+            )
+            scan.assert_not_called()
+
+    def test_probe_accepts_only_validated_wcdb_config_candidate(self) -> None:
+        master = bytes(range(32))
+        page, database_key = encrypted_page_for_master(master)
+        captured = bytearray(database_key)
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "message.db"
+            database.write_bytes(page)
+            with mock.patch("wechat_ai_exporter.key_probe._process_ids", return_value=[123]), \
+                    mock.patch("wechat_ai_exporter.key_probe._candidate_master_keys", return_value=iter(())), \
+                    mock.patch(
+                        "wechat_ai_exporter.key_probe._candidate_wcdb_config_keys",
+                        return_value=iter((captured,)),
+                    ):
+                result = probe_database_key(database, authorized=True)
+        self.assertEqual(result.adapter, EXACT_SALT_ADAPTER)
+        self.assertEqual(bytes(result.key), database_key)
 
     def test_probe_requires_authorization_before_process_access(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

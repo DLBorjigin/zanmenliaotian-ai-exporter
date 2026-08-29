@@ -14,6 +14,14 @@ The runtime separates version-sensitive behavior behind adapters:
 - native hooks, disabled unless explicitly authorized;
 - message schemas and media codecs.
 
+The Weixin 4.1.13.12 adapter is gated to that exact module version and a static
+WCDB configuration marker. It searches only for the exact in-memory registration
+pair for that marker, follows the verified configuration-node layout, decodes a
+bounded configuration value, and accepts only the key whose serialized salt
+matches the selected database. The key must then pass the selected database's
+first-page HMAC. It does not use arbitrary offsets, hooks, injection, or a saved
+memory dump. Message, session, and contact databases are validated independently.
+
 Unknown versions return a compatibility report and stop before content access. Original WeChat files are never modified. Secrets never cross the local process boundary or appear in CLI arguments, stdout, logs, manifests, or crash reports.
 
 Discovery is tiered. The fast tier checks running processes, registry entries, and standard locations. The optional bounded tier scans fixed drives for exact WeChat directory and executable names with depth, directory-count, time, and link-following limits. Reports use opaque IDs and path hints by default; account directory names and process IDs are withheld.

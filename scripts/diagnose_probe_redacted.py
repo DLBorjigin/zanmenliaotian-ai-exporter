@@ -4,11 +4,12 @@ import argparse
 import json
 from pathlib import Path
 import struct
+import time
 
 from wechat_ai_exporter.key_probe import (
-    SUPPORTED_ADAPTERS, _landmark_offsets, _open_reader, _owner_pointer_address,
-    _process_ids, _remote_std_string, _weixin_module, derive_database_key,
-    extract_xor_material,
+    EXACT_SALT_ADAPTER, SUPPORTED_ADAPTERS, _candidate_wcdb_config_keys,
+    _landmark_offsets, _open_reader, _owner_pointer_address, _process_ids,
+    _remote_std_string, _weixin_module, derive_database_key, extract_xor_material,
 )
 from wechat_ai_exporter.key_validation import PAGE_SIZE, WEIXIN4, verify_first_page, wipe_key
 
@@ -31,6 +32,7 @@ def diagnose(database: Path) -> dict[str, object]:
                 "cfg_pointer_plausible": 0,
                 "cipher_descriptor_read": 0,
                 "cipher_32_bytes": 0,
+                "decoded_key_validated_directly": 0,
                 "database_key_validated": 0,
             }
             for adapter in SUPPORTED_ADAPTERS
@@ -43,6 +45,11 @@ def diagnose(database: Path) -> dict[str, object]:
     report["process_count"] = len(pids)
     adapters = report["adapters"]
     assert isinstance(adapters, dict)
+    adapters[EXACT_SALT_ADAPTER] = {
+        "structured_candidates_found": 0,
+        "database_key_validated": 0,
+    }
+    deadline = time.monotonic() + 20.0
     for pid in pids:
         module = _weixin_module(pid)
         if module is None:
@@ -93,6 +100,8 @@ def diagnose(database: Path) -> dict[str, object]:
                     master = bytearray(a ^ b for a, b in zip(encrypted, material))
                     derived = bytearray()
                     try:
+                        if verify_first_page(master, page, WEIXIN4):
+                            counts["decoded_key_validated_directly"] += 1
                         derived = derive_database_key(master, page[:16])
                         if verify_first_page(derived, page, WEIXIN4):
                             counts["database_key_validated"] += 1
@@ -102,6 +111,15 @@ def diagnose(database: Path) -> dict[str, object]:
         finally:
             import ctypes
             ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
+        exact_counts = adapters[EXACT_SALT_ADAPTER]
+        assert isinstance(exact_counts, dict)
+        for candidate in _candidate_wcdb_config_keys(pid, page, deadline):
+            try:
+                exact_counts["structured_candidates_found"] += 1
+                if verify_first_page(candidate, page, WEIXIN4):
+                    exact_counts["database_key_validated"] += 1
+            finally:
+                wipe_key(candidate)
     return report
 
 

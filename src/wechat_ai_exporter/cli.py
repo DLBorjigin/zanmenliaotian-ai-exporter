@@ -17,7 +17,8 @@ from .decrypt import DecryptionError, decrypt_database
 from .exporter import ExportError, export_chat
 from .key_validation import KeyInputError, profile_for_layout, prompt_image_key, prompt_key, wipe_key
 from .key_probe import (
-    ProbeError, SUPPORTED_ADAPTERS, probe_database_key, wait_for_manual_weixin_exit,
+    ProbeError, READ_ONLY_PROBE_ADAPTER_NAMES, probe_database_key,
+    wait_for_manual_weixin_exit,
 )
 from .media import MediaResolver
 from .models import AccessMode, ExportScope, MessageKind
@@ -46,7 +47,7 @@ def _doctor_payload() -> dict[str, object]:
         },
         "network_required": False,
         "aes_backend_available": importlib.util.find_spec("cryptography") is not None,
-        "read_only_probe_adapters": [item.name for item in SUPPORTED_ADAPTERS],
+        "read_only_probe_adapters": list(READ_ONLY_PROBE_ADAPTER_NAMES),
         "native_hook_bundled": False,
         "status": "runtime_ready",
     }

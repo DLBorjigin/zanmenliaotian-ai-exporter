@@ -9,3 +9,12 @@ fail-closed version adapters, no key cache, and verification against the exact
 selected database.
 
 A copy of the Apache License 2.0 is included in `licenses/Apache-2.0.txt`.
+
+The Weixin 4.1.13.12 adapter's recognition of WCDB's serialized
+`x'<key><salt>'` configuration form was informed by
+[`zhuobichen/weflow-cli`](https://github.com/zhuobichen/weflow-cli), licensed
+under the MIT License. This project replaces that reference implementation's
+general key-pattern scan with an exact-version, exact-registration-node path and
+mandatory HMAC validation against the user-selected database.
+
+A copy of that MIT License is included in `licenses/MIT-weflow-cli.txt`.
