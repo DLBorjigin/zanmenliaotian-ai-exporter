@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wechat-ai-exporter"
+version = "1.0.0"
+description = "Local, read-only WeChat chat selection and AI export tooling"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=43"]
+
+[project.scripts]
+wechat-ai-export = "wechat_ai_exporter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,7 @@
+interface:
+  display_name: "微信聊天导出助手"
+  short_description: "用自然语言筛选并安全导出本人微信聊天，供 AI 分析"
+  brand_color: "#07C160"
+  default_prompt: "使用 $wechat-chat-export 导出我指定的一段微信聊天；先自动检查环境并显示数量预览。"
+policy:
+  allow_implicit_invocation: true
