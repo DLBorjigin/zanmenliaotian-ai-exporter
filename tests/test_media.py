@@ -159,6 +159,7 @@ class MediaTests(unittest.TestCase):
             )[0]
             self.assertEqual(result.status, "packaged_thumbnail_only")
             self.assertEqual(result.media_type, "image/jpeg")
+            self.assertTrue(result.relative_path.startswith("assets/videos/"))
 
     def test_file_is_matched_by_exact_xml_title(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -269,6 +270,7 @@ class MediaTests(unittest.TestCase):
                 ).resolve(message(MessageKind.EMOTICON, xml), root / "out" / "assets")[0]
             self.assertEqual(result.status, "packaged_remote")
             self.assertEqual(result.media_type, "image/gif")
+            self.assertTrue(result.relative_path.startswith("assets/emoticons/"))
             fetch.assert_called_once()
 
     def test_business_emoticon_tree_is_indexed_only_when_explicitly_included(self) -> None:
@@ -326,6 +328,7 @@ class MediaTests(unittest.TestCase):
                 assets = [name for name in archive.namelist() if name.startswith("assets/")]
                 manifest = json.loads(archive.read("manifest.json"))
                 self.assertEqual(len(assets), 1)
+                self.assertTrue(assets[0].startswith("assets/images/"))
                 self.assertEqual(archive.read(assets[0]), plaintext)
                 self.assertEqual(manifest["assets"][0]["status"], "packaged")
 

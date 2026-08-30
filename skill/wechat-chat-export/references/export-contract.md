@@ -5,7 +5,9 @@ Create a ZIP containing:
 - `transcript.md`: chronological, readable conversation text with relative attachment links.
 - `messages.json`: normalized chronological records for programmatic or AI ingestion.
 - `manifest.json`: schema version, requested scope, checksums, message counts, attachment mapping, and privacy flags.
-- `assets/`: only attachments selected by the user.
+- `assets/`: only attachments selected by the user, separated into stable
+  message-type directories: `images/`, `videos/`, `emoticons/`, `audio/`, and
+  `files/`. A video thumbnail remains under `videos/` even when its file format is JPEG.
 
 Exclude database keys, absolute source paths, raw account identifiers unless requested, temporary decrypted databases, and diagnostic memory data. Represent omitted or unavailable content with explicit placeholders so the timeline remains understandable.
 

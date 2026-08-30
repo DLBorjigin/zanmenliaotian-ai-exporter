@@ -2,6 +2,11 @@
 
 Copy media only after the user confirms attachment copying. Restrict filesystem search to the selected account root and use a bounded index. Resolve candidates from exact local paths, XML filenames, or stable hexadecimal identifiers found in message metadata. If equally strong candidates remain, report `ambiguous_match` and copy none.
 
+Package resolved files by message kind, not by detected file extension:
+`assets/images/`, `assets/videos/`, `assets/emoticons/`, `assets/audio/`, and
+`assets/files/`. This keeps a JPEG video cover in the video section and a PNG
+emoticon in the emoticon section instead of mixing either with normal images.
+
 Keep `business/emoticon` out of the normal media index. Add it to the same
 bounded, no-link-following index only when the approved message-type selection
 explicitly includes emoticons. Identical top candidates may be deduplicated by

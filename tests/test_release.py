@@ -28,7 +28,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertTrue((output / "双击卸载.cmd").is_file())
             self.assertTrue((output / "双击恢复上一版本.cmd").is_file())
             self.assertTrue((output / "版本信息.json").is_file())
-            self.assertTrue((output / "微信聊天导出工具-v1.0.2-Windows.zip").is_file())
+            self.assertTrue((output / "微信聊天导出工具-v1.0.3-Windows.zip").is_file())
             self.assertTrue((output / "发行包SHA256.txt").is_file())
             with zipfile.ZipFile(skill_zip) as archive:
                 names = archive.namelist()
@@ -47,7 +47,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             payload = json.loads(run.stdout)
             self.assertEqual(payload["status"], "runtime_ready")
-            self.assertEqual(payload["version"], "1.0.2")
+            self.assertEqual(payload["version"], "1.0.3")
             info = json.loads((output / "版本信息.json").read_text(encoding="utf-8"))
             self.assertIn("4.1.13.12", info["live_validated_weixin_versions"])
             self.assertFalse(payload["network_required"])

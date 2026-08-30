@@ -28,6 +28,14 @@ IMAGE_MAGICS = (
     (b"II*\x00", ".tif", "image/tiff"),
 )
 
+ASSET_KIND_DIRECTORIES = {
+    MessageKind.IMAGE: "images",
+    MessageKind.VIDEO: "videos",
+    MessageKind.AUDIO: "audio",
+    MessageKind.FILE: "files",
+    MessageKind.EMOTICON: "emoticons",
+}
+
 
 @dataclass(frozen=True)
 class AssetRecord:
@@ -81,6 +89,11 @@ def _allowed_remote_media_host(hostname: str) -> bool:
         or hostname == "weixin.qq.com" or hostname.endswith(".weixin.qq.com")
         or hostname == "wxapp.tc.qq.com"
     )
+
+
+def _asset_dir(assets_root: Path, message: NormalizedMessage) -> Path:
+    category = ASSET_KIND_DIRECTORIES.get(message.kind, "other")
+    return assets_root / category / message.id
 
 
 def decode_legacy_xor(data: bytes) -> tuple[bytes, str, str] | None:
@@ -366,7 +379,7 @@ class MediaResolver:
             return self._status(message, "not_found")
         if size > self.max_asset_bytes:
             return self._status(message, "size_limit_exceeded", source.name)
-        asset_dir = assets_root / message.id
+        asset_dir = _asset_dir(assets_root, message)
         asset_dir.mkdir(parents=True, exist_ok=True)
         if source.suffix.casefold() == ".dat":
             data = source.read_bytes()
@@ -477,7 +490,7 @@ class MediaResolver:
                 if detected is None or detected[0] == ".wxgf":
                     continue
                 extension, media_type = detected
-                asset_dir = assets_root / message.id
+                asset_dir = _asset_dir(assets_root, message)
                 asset_dir.mkdir(parents=True, exist_ok=True)
                 target = asset_dir / _safe_name(
                     message.id + "_emoticon" + extension,
@@ -519,7 +532,7 @@ class MediaResolver:
             if detected is None or detected[0] == ".wxgf":
                 continue
             extension, media_type = detected
-            asset_dir = assets_root / message.id
+            asset_dir = _asset_dir(assets_root, message)
             asset_dir.mkdir(parents=True, exist_ok=True)
             target = asset_dir / _safe_name(
                 source.stem + "_preview" + extension,
@@ -580,7 +593,7 @@ class MediaResolver:
         status = "packaged_requires_conversion"
         extension = ".silk" if data.startswith(b"#!SILK_V3") else ".bin"
         media_type = "audio/silk" if extension == ".silk" else "application/octet-stream"
-        asset_dir = assets_root / message.id
+        asset_dir = _asset_dir(assets_root, message)
         asset_dir.mkdir(parents=True, exist_ok=True)
         target = asset_dir / f"voice{extension}"
         target.write_bytes(data)
