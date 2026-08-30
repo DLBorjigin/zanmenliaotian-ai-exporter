@@ -10,6 +10,7 @@ from typing import Iterator
 import xml.etree.ElementTree as ET
 
 from .models import Conversation, ExportScope, MessageKind, NormalizedMessage
+from .zstd_codec import decode_zstd_if_needed
 
 
 class ChatDataError(RuntimeError):
@@ -130,6 +131,15 @@ def _text(value: object) -> str:
         except UnicodeDecodeError:
             return ""
     return str(value)
+
+
+def _decoded_text(value: object) -> str:
+    if isinstance(value, bytes):
+        decoded = decode_zstd_if_needed(value)
+        if decoded is None:
+            return ""
+        value = decoded
+    return _text(value)
 
 
 class ChatDataset:
@@ -431,6 +441,9 @@ class ChatDataset:
                 _column_expression(columns, "create_time", "created", "m"),
                 _column_expression(columns, "message_content", "content", "m"),
                 _column_expression(columns, "packed_info_data", "packed_info", "m"),
+                _column_expression(columns, "source", "source", "m"),
+                _column_expression(columns, "compress_content", "compress_content", "m"),
+                _column_expression(columns, "origin_source", "origin_source", "m"),
                 sender_expression,
             ]
             time_name = columns.get("create_time")
@@ -451,15 +464,20 @@ class ChatDataset:
                 f"{where} ORDER BY m.{_quote(time_name)}, m.rowid LIMIT ?"
             )
             for row in connection.execute(query, parameters):
-                sender_id = _text(row[9])
+                sender_id = _text(row[12])
                 sender = _display_label(
                     sender_id, self._contacts.get(sender_id, sender_id or conversation.display_name)
                 )
+                content = _decoded_text(row[7]) or _decoded_text(row[10])
+                normalized_row = (*row[1:7], content)
                 message = self._normalize_row(
-                    conversation, row[1:8], sender=sender,
+                    conversation, normalized_row, sender=sender,
                     metadata={
                         "local_id": int(row[0] or 0), "server_id": int(row[2] or 0),
                         "table": conversation.table, "packed_info": row[8],
+                        "source": _decoded_text(row[9]),
+                        "compress_content": _decoded_text(row[10]),
+                        "origin_source": _decoded_text(row[11]),
                     },
                 )
                 if message.kind in scope.include:

@@ -71,6 +71,7 @@ def build(output: Path) -> list[Path]:
         "platform": "Windows 10/11 x64",
         "skill_name": "wechat-chat-export",
         "network_required": False,
+        "optional_network_media_download": True,
         "wechat_process_modified": False,
         "native_hook_bundled": False,
         "live_validated_weixin_versions": ["4.1.12.55", "4.1.13.12"],

@@ -33,6 +33,15 @@ page-HMAC check. Do not replace this structured path with an unrestricted search
 for key-like byte sequences. Unknown versions remain unsupported until separately
 researched and validated.
 
+After the exact 4.1.13.12 database key has passed HMAC validation, a separately
+authorized V2 image-key request may read the existing bounded `global_config`
+account fields through the known adapter offsets. The matching WCDB configuration
+and `global_config` may live in different child processes of the same running
+Weixin instance, so inspect the bounded known structure in each running Weixin
+PID after the exact database key is verified. Keep database-key acceptance
+independent from media-key derivation; the derived media key is accepted for an
+asset only when V2 padding and the decrypted image signature both validate.
+
 Example after explicit confirmation:
 
 ```text

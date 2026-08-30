@@ -25,7 +25,9 @@ nontechnical user to install Python or packages manually.
 5. List conversations and preview counts before reading bodies. Resolve duplicate
    display names with opaque conversation IDs; do not expose internal usernames.
 6. Export only the approved scope. Attachments and image-key discovery require
-   separate confirmation. Preserve the original database and media files unchanged.
+   separate confirmation. Remote media completion requires another explicit
+   network confirmation and stays disabled otherwise. Preserve the original
+   database and media files unchanged.
 7. Return a clickable ZIP link and a short summary of included and excluded counts.
    Translate failures into plain language with one safe next action; keep raw
    diagnostics redacted and never make the user debug a command line.

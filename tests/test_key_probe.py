@@ -120,6 +120,62 @@ class KeyProbeTests(unittest.TestCase):
         self.assertEqual(result.adapter, EXACT_SALT_ADAPTER)
         self.assertEqual(bytes(result.key), database_key)
 
+    def test_exact_salt_adapter_can_pair_separately_authorized_media_key(self) -> None:
+        master = bytes(range(32))
+        page, database_key = encrypted_page_for_master(master)
+        captured = bytearray(database_key)
+        media_key = bytearray(b"0123456789abcdef")
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "message.db"
+            database.write_bytes(page)
+            with mock.patch("wechat_ai_exporter.key_probe._process_ids", return_value=[123]), \
+                    mock.patch("wechat_ai_exporter.key_probe._candidate_master_keys", return_value=iter(())), \
+                    mock.patch(
+                        "wechat_ai_exporter.key_probe._candidate_wcdb_config_keys",
+                        return_value=iter((captured,)),
+                    ), mock.patch(
+                        "wechat_ai_exporter.key_probe._candidate_image_keys_from_global_config",
+                        return_value=iter(((7, media_key, 7),)),
+                    ):
+                result = probe_database_key(
+                    database, authorized=True, derive_media_key=True
+                )
+        self.assertEqual(result.adapter, EXACT_SALT_ADAPTER)
+        self.assertEqual(bytes(result.key), database_key)
+        self.assertIs(result.image_key, media_key)
+        self.assertEqual(result.image_xor_key, 7)
+
+    def test_exact_salt_adapter_can_find_media_config_in_another_weixin_process(self) -> None:
+        master = bytes(range(32))
+        page, database_key = encrypted_page_for_master(master)
+        captured = bytearray(database_key)
+        media_key = bytearray(b"fedcba9876543210")
+
+        def database_candidates(pid, _page, _deadline):
+            return iter((captured,)) if pid == 123 else iter(())
+
+        def media_candidates(pid, _deadline):
+            return iter(((9, media_key, 9),)) if pid == 456 else iter(())
+
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "message.db"
+            database.write_bytes(page)
+            with mock.patch("wechat_ai_exporter.key_probe._process_ids", return_value=[123, 456]), \
+                    mock.patch("wechat_ai_exporter.key_probe._candidate_master_keys", return_value=iter(())), \
+                    mock.patch(
+                        "wechat_ai_exporter.key_probe._candidate_wcdb_config_keys",
+                        side_effect=database_candidates,
+                    ), mock.patch(
+                        "wechat_ai_exporter.key_probe._candidate_image_keys_from_global_config",
+                        side_effect=media_candidates,
+                    ):
+                result = probe_database_key(
+                    database, authorized=True, derive_media_key=True
+                )
+        self.assertEqual(bytes(result.key), database_key)
+        self.assertIs(result.image_key, media_key)
+        self.assertEqual(result.image_xor_key, 9)
+
     def test_probe_requires_authorization_before_process_access(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             database = Path(temp) / "message.db"

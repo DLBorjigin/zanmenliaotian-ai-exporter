@@ -46,6 +46,7 @@ def _doctor_payload() -> dict[str, object]:
             for mode, item in AUTHORIZATION_MATRIX.items()
         },
         "network_required": False,
+        "optional_network_media_download": True,
         "aes_backend_available": importlib.util.find_spec("cryptography") is not None,
         "read_only_probe_adapters": list(READ_ONLY_PROBE_ADAPTER_NAMES),
         "native_hook_bundled": False,
@@ -208,6 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
     export_auto.add_argument("--confirm-copy-attachments", action="store_true")
     export_auto.add_argument("--confirm-image-key-discovery", action="store_true")
     export_auto.add_argument("--confirm-voice-media-database", action="store_true")
+    export_auto.add_argument("--allow-remote-media-download", action="store_true")
+    export_auto.add_argument("--confirm-remote-media-download", action="store_true")
     export_auto.add_argument("--json", action="store_true", dest="as_json")
     sessions = sub.add_parser(
         "list-sessions", help="List authorized conversations from retained plaintext snapshots."
@@ -257,6 +260,8 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--confirm-copy-attachments", action="store_true")
     export.add_argument("--confirm-image-key-use", action="store_true")
     export.add_argument("--confirm-read-process-memory-for-image-key", action="store_true")
+    export.add_argument("--allow-remote-media-download", action="store_true")
+    export.add_argument("--confirm-remote-media-download", action="store_true")
     export.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
@@ -887,6 +892,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.include_assets and not args.confirm_copy_attachments:
             print("Separate confirmation is required to copy selected attachments.", file=sys.stderr)
             return 4
+        if args.allow_remote_media_download and not args.confirm_remote_media_download:
+            print("Separate confirmation is required for selected-media network downloads.", file=sys.stderr)
+            return 4
         if args.include_assets and not (args.account_root or args.voice_media_database):
             print("An account root or exact voice media database is required for attachments.", file=sys.stderr)
             return 3
@@ -932,6 +940,7 @@ def main(argv: list[str] | None = None) -> int:
                         image_aes_key=image_key or None,
                         image_xor_key=image_xor_key,
                         include_emoticons=MessageKind.EMOTICON in scope.include,
+                        allow_remote_media_download=args.allow_remote_media_download,
                     )
                 export_result = export_chat(
                     dataset, scope, Path(args.output_dir),
@@ -1021,6 +1030,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.include_assets and not args.confirm_copy_attachments:
             print("Separate confirmation is required to copy attachments.", file=sys.stderr)
             return 4
+        if args.allow_remote_media_download and not args.confirm_remote_media_download:
+            print("Separate confirmation is required for selected-media network downloads.", file=sys.stderr)
+            return 4
         if args.include_assets and not (args.account_root or args.media_database):
             print("An account root or plaintext media database is required for attachments.", file=sys.stderr)
             return 3
@@ -1071,6 +1083,7 @@ def main(argv: list[str] | None = None) -> int:
                     image_aes_key=image_key or None,
                     image_xor_key=image_xor_key,
                     include_emoticons=MessageKind.EMOTICON in scope.include,
+                    allow_remote_media_download=args.allow_remote_media_download,
                 )
             result = export_chat(
                 _dataset_from_args(args), scope, Path(args.output_dir),

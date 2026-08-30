@@ -3,6 +3,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from wechat_ai_exporter.chat_data import ChatDataset, message_kind
 from wechat_ai_exporter.models import ExportScope, MessageKind
@@ -124,6 +125,49 @@ class ChatDataTests(unittest.TestCase):
         self.assertEqual(message_kind(47), MessageKind.EMOTICON)
         self.assertEqual(message_kind(10_000), MessageKind.SYSTEM)
         self.assertEqual(message_kind(49, "<msg><appmsg><type>6</type></appmsg></msg>"), MessageKind.FILE)
+
+    def test_v4_compressed_content_can_classify_file_without_message_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            message_db = root / "message.db"
+            session_db = root / "session.db"
+            table = "Msg_" + hashlib.md5(b"room@chatroom").hexdigest()
+            connection = sqlite3.connect(message_db)
+            connection.execute(
+                f'CREATE TABLE "{table}" (local_id INTEGER, server_id INTEGER, '
+                "local_type INTEGER, sort_seq INTEGER, create_time INTEGER, status INTEGER, "
+                "message_content TEXT, compress_content BLOB, source BLOB)"
+            )
+            connection.execute(
+                f'INSERT INTO "{table}" VALUES (1, 2, 49, 3, 1700000000, 4, NULL, ?, ?)',
+                (b"compressed-file", b"compressed-source"),
+            )
+            connection.commit()
+            connection.close()
+            connection = sqlite3.connect(session_db)
+            connection.execute("CREATE TABLE SessionTable (username TEXT)")
+            connection.execute("INSERT INTO SessionTable VALUES ('room@chatroom')")
+            connection.commit()
+            connection.close()
+            xml = b"<msg><appmsg><type>6</type><title>report.pdf</title></appmsg></msg>"
+
+            def decode(value):
+                if value == b"compressed-file":
+                    return xml
+                return value
+
+            with mock.patch(
+                "wechat_ai_exporter.chat_data.decode_zstd_if_needed", side_effect=decode
+            ):
+                dataset = ChatDataset([message_db], "weixin-4", session_database=session_db)
+                conversation = dataset.conversations()[0]
+                scope = ExportScope(
+                    conversation.id, include=frozenset({MessageKind.FILE})
+                )
+                messages = list(dataset.iter_messages(scope))
+            self.assertEqual(len(messages), 1)
+            self.assertEqual(messages[0].kind, MessageKind.FILE)
+            self.assertIn("report.pdf", messages[0].content)
 
 
 if __name__ == "__main__":

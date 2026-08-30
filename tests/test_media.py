@@ -2,11 +2,14 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 import json
 import zipfile
 
 from wechat_ai_exporter.exporter import export_chat
-from wechat_ai_exporter.media import MediaResolver, V2_MAGIC, decode_legacy_xor
+from wechat_ai_exporter.media import (
+    MediaResolver, V2_MAGIC, _allowed_remote_media_host, decode_legacy_xor,
+)
 from wechat_ai_exporter.models import Conversation, ExportScope, MessageKind, NormalizedMessage
 
 
@@ -25,6 +28,12 @@ def message(kind: MessageKind, content: str = "", packed_info=None,
 
 
 class MediaTests(unittest.TestCase):
+    def test_remote_media_host_allowlist_is_exact(self) -> None:
+        self.assertTrue(_allowed_remote_media_host("wxapp.tc.qq.com"))
+        self.assertTrue(_allowed_remote_media_host("emoji.qpic.cn"))
+        self.assertFalse(_allowed_remote_media_host("evilqq.com"))
+        self.assertFalse(_allowed_remote_media_host("wxapp.tc.qq.com.attacker.invalid"))
+
     def test_legacy_xor_image_is_decoded_and_packaged(self) -> None:
         plaintext = b"\xff\xd8\xff\xe0" + b"test-jpeg" + b"\xff\xd9"
         key = 0x5A
@@ -103,6 +112,54 @@ class MediaTests(unittest.TestCase):
             self.assertEqual(result.status, "image_v2_key_invalid_or_xor_unavailable")
             self.assertIsNone(result.relative_path)
 
+    def test_v2_wxgf_packages_opaque_original_and_viewable_preview(self) -> None:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        def encode(plaintext: bytes, key: bytearray, xor_key: int) -> bytes:
+            first = plaintext
+            pad = 16 - len(first) % 16
+            padded = first + bytes([pad]) * pad
+            encryptor = Cipher(algorithms.AES(bytes(key)), modes.ECB()).encryptor()
+            encrypted = encryptor.update(padded) + encryptor.finalize()
+            return (
+                V2_MAGIC + len(first).to_bytes(4, "little")
+                + (0).to_bytes(4, "little") + b"\x00" + encrypted
+            )
+
+        token = "ababcdcdababcdcdababcdcdababcdcd"
+        key = bytearray(b"0123456789abcdef")
+        xor_key = 0x31
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "msg" / "attach" / "x" / "Img" / f"{token}.dat"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(encode(b"wxgf" + b"opaque-original", key, xor_key))
+            preview = source.with_name(source.stem + "_t.dat")
+            preview.write_bytes(encode(b"\xff\xd8\xffpreview\xff\xd9", key, xor_key))
+            results = MediaResolver(
+                root, image_aes_key=key, image_xor_key=xor_key
+            ).resolve(message(MessageKind.IMAGE, token), root / "out" / "assets")
+            self.assertEqual(
+                [item.status for item in results],
+                ["packaged_opaque", "packaged_preview"],
+            )
+            self.assertTrue(
+                (root / "out" / results[1].relative_path).read_bytes().startswith(b"\xff\xd8\xff")
+            )
+
+    def test_video_jpeg_is_labeled_thumbnail_only(self) -> None:
+        token = "12341234123412341234123412341234"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "msg" / "attach" / "x" / "Video" / f"{token}.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"\xff\xd8\xffvideo-thumb\xff\xd9")
+            result = MediaResolver(root).resolve(
+                message(MessageKind.VIDEO, token), root / "out" / "assets"
+            )[0]
+            self.assertEqual(result.status, "packaged_thumbnail_only")
+            self.assertEqual(result.media_type, "image/jpeg")
+
     def test_file_is_matched_by_exact_xml_title(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -156,6 +213,63 @@ class MediaTests(unittest.TestCase):
             )[0]
             self.assertEqual(result.status, "ambiguous_match")
             self.assertIsNone(result.relative_path)
+
+    def test_identical_duplicate_candidates_are_deduplicated(self) -> None:
+        token = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for folder in (root / "business" / "emoticon", root / "cache" / "emoji"):
+                folder.mkdir(parents=True)
+                (folder / f"{token}.gif").write_bytes(b"GIF89a" + b"same")
+            result = MediaResolver(root, include_emoticons=True).resolve(
+                message(MessageKind.EMOTICON, token), root / "out" / "assets"
+            )[0]
+            self.assertEqual(result.status, "packaged")
+
+    def test_unknown_local_emoticon_is_not_packaged_as_viewable_media(self) -> None:
+        token = "efefefefefefefefefefefefefefefef"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "business" / "emoticon" / token
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"private-wechat-emoticon")
+            result = MediaResolver(root, include_emoticons=True).resolve(
+                message(MessageKind.EMOTICON, token), root / "out" / "assets"
+            )[0]
+            self.assertEqual(result.status, "unsupported_emoticon_format")
+            self.assertIsNone(result.relative_path)
+
+    def test_remote_emoticon_requires_opt_in_and_validates_image(self) -> None:
+        token = "12121212121212121212121212121212"
+        xml = f'<emoji md5="{token}" cdnurl="https://emoji.qpic.cn/wx_emoji/example/" />'
+
+        class Response:
+            headers = {"Content-Length": "17"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def geturl(self):
+                return "https://emoji.qpic.cn/wx_emoji/example/"
+
+            def read(self, _limit):
+                return b"GIF89a" + b"remote-gif"
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "business" / "emoticon" / token
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"private-wechat-emoticon")
+            with mock.patch("urllib.request.urlopen", return_value=Response()) as fetch:
+                result = MediaResolver(
+                    root, include_emoticons=True, allow_remote_media_download=True
+                ).resolve(message(MessageKind.EMOTICON, xml), root / "out" / "assets")[0]
+            self.assertEqual(result.status, "packaged_remote")
+            self.assertEqual(result.media_type, "image/gif")
+            fetch.assert_called_once()
 
     def test_business_emoticon_tree_is_indexed_only_when_explicitly_included(self) -> None:
         token = "abababababababababababababababab"

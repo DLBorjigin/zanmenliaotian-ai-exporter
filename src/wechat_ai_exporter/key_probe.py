@@ -574,6 +574,52 @@ def _candidate_master_keys(pid: int, adapter: MasterKeyAdapter, deadline: float,
         _kernel32().CloseHandle(handle)
 
 
+def _candidate_image_keys_from_global_config(
+    pid: int, deadline: float
+) -> Iterator[tuple[int, bytearray, int]]:
+    """Read only the account fields needed for the separately authorized media key."""
+    module = _weixin_module(pid)
+    if module is None:
+        return
+    base, module_size, _dll_path = module
+    if not 0 < module_size <= MAX_DLL_SIZE:
+        return
+    handle, read = _open_reader(pid)
+    seen_configs: set[int] = set()
+    try:
+        image = read(base, module_size)
+        if image is None:
+            return
+        landmarks = list(_landmark_offsets(image))
+        for adapter in SUPPORTED_ADAPTERS:
+            for landmark in landmarks:
+                if time.monotonic() > deadline or landmark < adapter.pointer_back:
+                    return
+                pointer_data = read(_owner_pointer_address(base, landmark, adapter), 8)
+                if not pointer_data:
+                    continue
+                owner = struct.unpack("<Q", pointer_data)[0]
+                cfg_data = read(owner + adapter.cfg_pointer_offset, 8)
+                if not cfg_data:
+                    continue
+                cfg = struct.unpack("<Q", cfg_data)[0]
+                if not 0x10000 <= cfg < 0x800000000000 or cfg in seen_configs:
+                    continue
+                seen_configs.add(cfg)
+                dword_data = read(cfg + adapter.cfg_dword_offset, 4)
+                account = _remote_std_string(read, cfg + adapter.cfg_account_offset)
+                if not dword_data or not isinstance(account, str) or not account:
+                    continue
+                cfg_dword = struct.unpack("<I", dword_data)[0]
+                try:
+                    image_key, image_xor_key = derive_image_key(cfg_dword, account)
+                except ProbeError:
+                    continue
+                yield cfg_dword, image_key, image_xor_key
+    finally:
+        _kernel32().CloseHandle(handle)
+
+
 def probe_database_key(database: Path, *, authorized: bool,
                        time_budget_seconds: float = 20.0,
                        derive_media_key: bool = False) -> ProbeResult:
@@ -613,21 +659,32 @@ def probe_database_key(database: Path, *, authorized: bool,
                             wipe_key(image_key)
             if time.monotonic() > deadline:
                 raise ProbeError("The bounded read-only scan reached its time limit without a verified key.")
-    if not derive_media_key:
-        for pid in pids:
-            for candidate in _candidate_wcdb_config_keys(pid, first_page, deadline):
+    for pid in pids:
+        for candidate in _candidate_wcdb_config_keys(pid, first_page, deadline):
+            accepted = False
+            try:
+                accepted = verify_first_page(candidate, first_page, WEIXIN4)
+                if not accepted:
+                    continue
+                if not derive_media_key:
+                    return ProbeResult(candidate, EXACT_SALT_ADAPTER, pid, 0)
+                media_pids = [pid, *(item for item in pids if item != pid)]
+                for media_pid in media_pids:
+                    for cfg_dword, image_key, image_xor_key in (
+                        _candidate_image_keys_from_global_config(media_pid, deadline)
+                    ):
+                        return ProbeResult(
+                            candidate, EXACT_SALT_ADAPTER, pid, cfg_dword,
+                            image_key=image_key, image_xor_key=image_xor_key,
+                        )
                 accepted = False
-                try:
-                    accepted = verify_first_page(candidate, first_page, WEIXIN4)
-                    if accepted:
-                        return ProbeResult(candidate, EXACT_SALT_ADAPTER, pid, 0)
-                finally:
-                    if not accepted:
-                        wipe_key(candidate)
-            if time.monotonic() > deadline:
-                raise ProbeError(
-                    "The bounded read-only scan reached its time limit without a verified key."
-                )
+            finally:
+                if not accepted:
+                    wipe_key(candidate)
+        if time.monotonic() > deadline:
+            raise ProbeError(
+                "The bounded read-only scan reached its time limit without a verified key."
+            )
     raise ProbeError(
         "No supported adapter produced a key that validates the selected database. "
         "This WeChat build may need a new read-only adapter."

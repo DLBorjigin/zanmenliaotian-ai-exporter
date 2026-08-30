@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
+import html
 import os
 from pathlib import Path
 import re
 import shutil
 import sqlite3
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from .chat_data import _columns, _connect, _quote, _tables
 from .models import MessageKind, NormalizedMessage
@@ -68,6 +72,15 @@ def _detect_image(data: bytes) -> tuple[str, str] | None:
     if data.startswith(b"wxgf"):
         return ".wxgf", "application/x-wechat-wxgf"
     return None
+
+
+def _allowed_remote_media_host(hostname: str) -> bool:
+    hostname = hostname.casefold().rstrip(".")
+    return (
+        hostname == "qpic.cn" or hostname.endswith(".qpic.cn")
+        or hostname == "weixin.qq.com" or hostname.endswith(".weixin.qq.com")
+        or hostname == "wxapp.tc.qq.com"
+    )
 
 
 def decode_legacy_xor(data: bytes) -> tuple[bytes, str, str] | None:
@@ -157,6 +170,9 @@ class MediaIndex:
         emoticon_root = self.account_root / "business" / "emoticon"
         if self.include_emoticons and emoticon_root.is_dir():
             roots.append(emoticon_root)
+        cache_root = self.account_root / "cache"
+        if self.include_emoticons and cache_root.is_dir():
+            roots.append(cache_root)
         started = time.monotonic()
         for root in roots:
             for current, directories, files in os.walk(root, followlinks=False):
@@ -188,13 +204,15 @@ class MediaResolver:
                  max_asset_bytes: int = 512 * 1024 * 1024,
                  image_aes_key: bytearray | None = None,
                  image_xor_key: int | None = None,
-                 include_emoticons: bool = False) -> None:
+                 include_emoticons: bool = False,
+                 allow_remote_media_download: bool = False) -> None:
         self.account_root = Path(account_root) if account_root else None
         self.media_databases = [Path(item) for item in (media_databases or [])]
         self.max_asset_bytes = max_asset_bytes
         self.image_aes_key = image_aes_key
         self.image_xor_key = image_xor_key
         self.include_emoticons = include_emoticons
+        self.allow_remote_media_download = allow_remote_media_download
         self._index: MediaIndex | None = None
 
     def _media_index(self) -> MediaIndex | None:
@@ -224,9 +242,39 @@ class MediaResolver:
             return [self._status(message, "not_found")]
         top_score = candidates[0][0]
         top = sorted({path for score, path in candidates if score == top_score})
+        if len(top) > 1 and self._all_files_identical(top):
+            top = [top[0]]
         if len(top) != 1:
             return [self._status(message, "ambiguous_match")]
-        return [self._package_path(message, top[0], assets_root)]
+        primary = self._package_path(message, top[0], assets_root)
+        if (
+            message.kind == MessageKind.EMOTICON
+            and self.allow_remote_media_download
+            and primary.status in {"unsupported_emoticon_format", "unsupported_dat_format"}
+        ):
+            remote = self._package_remote_emoticon(message, assets_root)
+            if remote is not None:
+                primary = remote
+        records = [primary]
+        if (
+            primary.status == "packaged_opaque"
+            and message.kind in {MessageKind.IMAGE, MessageKind.EMOTICON}
+            and top[0].suffix.casefold() == ".dat"
+        ):
+            preview = self._package_v2_preview(message, top[0], assets_root)
+            if preview is not None:
+                records.append(preview)
+        return records
+
+    @staticmethod
+    def _all_files_identical(paths: list[Path]) -> bool:
+        fingerprints = set()
+        for path in paths:
+            try:
+                fingerprints.add((path.stat().st_size, _hash_file(path)))
+            except OSError:
+                return False
+        return len(fingerprints) == 1
 
     def _status(self, message: NormalizedMessage, status: str,
                 original_name: str | None = None) -> AssetRecord:
@@ -237,6 +285,10 @@ class MediaResolver:
 
     def _metadata_text(self, message: NormalizedMessage) -> str:
         pieces = [message.content]
+        for name in ("source", "compress_content", "origin_source"):
+            value = message.metadata.get(name)
+            if value:
+                pieces.append(str(value))
         raw = message.metadata.get("packed_info")
         if isinstance(raw, bytes):
             for chunk in re.findall(rb"[\x20-\x7e]{4,}", raw):
@@ -285,12 +337,24 @@ class MediaResolver:
                 bonus += 10
             if message.kind == MessageKind.VIDEO and "video" in lowered:
                 bonus += 10
+            if message.kind == MessageKind.VIDEO and path.suffix.casefold() in {
+                ".mp4", ".mov", ".m4v", ".avi", ".mkv",
+            }:
+                bonus += 15
+            if message.kind == MessageKind.VIDEO and path.suffix.casefold() in {
+                ".jpg", ".jpeg", ".png", ".webp",
+            }:
+                bonus -= 3
             if message.kind == MessageKind.FILE and "file" in lowered:
                 bonus += 10
             if message.kind == MessageKind.IMAGE and "_h.dat" in lowered:
                 bonus += 3
             if message.kind == MessageKind.IMAGE and "_t.dat" in lowered:
                 bonus -= 2
+            if message.kind == MessageKind.EMOTICON and (
+                path.suffix.casefold() == ".thumb" or "thumb" in path.name.casefold()
+            ):
+                bonus -= 3
             scores[path] += bonus
         return sorted(((score, path) for path, score in scores.items()), key=lambda item: (-item[0], str(item[1])))
 
@@ -325,9 +389,10 @@ class MediaResolver:
                 name = _safe_name(source.stem + extension, message.id + extension)
                 target = asset_dir / name
                 target.write_bytes(decoded)
+                status = "packaged_opaque" if extension == ".wxgf" else "packaged"
                 return AssetRecord(
                     id=f"asset-{message.id.removeprefix('message-')}", message_id=message.id,
-                    kind=message.kind.value, status="packaged", relative_path=target.relative_to(assets_root.parent).as_posix(),
+                    kind=message.kind.value, status=status, relative_path=target.relative_to(assets_root.parent).as_posix(),
                     media_type=media_type, size=len(decoded), sha256=_hash_bytes(decoded),
                     original_name=source.name,
                 )
@@ -352,15 +417,124 @@ class MediaResolver:
                 original_name=source.name,
             )
         name = _safe_name(source.name, message.id + source.suffix)
+        try:
+            with source.open("rb") as handle:
+                detected = _detect_image(handle.read(16))
+        except OSError:
+            detected = None
+        if message.kind == MessageKind.EMOTICON and detected is None:
+            return self._status(message, "unsupported_emoticon_format", source.name)
         target = asset_dir / name
         shutil.copy2(source, target)
         relative = target.relative_to(assets_root.parent).as_posix()
+        status = "packaged"
+        media_type = detected[1] if detected else None
+        if message.kind == MessageKind.VIDEO and detected is not None:
+            status = "packaged_thumbnail_only"
+        elif message.kind == MessageKind.VIDEO and source.suffix.casefold() in {
+            ".mp4", ".m4v", ".mov",
+        }:
+            media_type = "video/mp4"
         return AssetRecord(
             id=f"asset-{_hash_file(target)[:12]}", message_id=message.id,
-            kind=message.kind.value, status="packaged", relative_path=relative,
-            media_type=None, size=target.stat().st_size, sha256=_hash_file(target),
+            kind=message.kind.value, status=status, relative_path=relative,
+            media_type=media_type, size=target.stat().st_size, sha256=_hash_file(target),
             original_name=source.name,
         )
+
+    def _package_remote_emoticon(
+        self, message: NormalizedMessage, assets_root: Path
+    ) -> AssetRecord | None:
+        text = html.unescape(self._metadata_text(message))
+        urls = []
+        for name in ("cdnurl", "tpurl", "externurl", "thumburl", "cdnthumburl"):
+            match = re.search(rf'(?is)\b{name}\s*=\s*["\']([^"\']+)["\']', text)
+            if match:
+                urls.append(match.group(1).strip())
+        for raw_url in urls:
+            try:
+                parsed = urllib.parse.urlsplit(raw_url)
+                hostname = (parsed.hostname or "").casefold()
+                if parsed.scheme not in {"http", "https"} or not _allowed_remote_media_host(hostname):
+                    continue
+                if parsed.scheme == "http":
+                    parsed = parsed._replace(scheme="https")
+                url = urllib.parse.urlunsplit(parsed)
+                request = urllib.request.Request(
+                    url, headers={"User-Agent": "wechat-ai-exporter/1"}
+                )
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    final_host = (urllib.parse.urlsplit(response.geturl()).hostname or "").casefold()
+                    if not _allowed_remote_media_host(final_host):
+                        continue
+                    declared = response.headers.get("Content-Length")
+                    if declared and int(declared) > self.max_asset_bytes:
+                        continue
+                    data = response.read(self.max_asset_bytes + 1)
+                if len(data) > self.max_asset_bytes:
+                    continue
+                detected = _detect_image(data)
+                if detected is None or detected[0] == ".wxgf":
+                    continue
+                extension, media_type = detected
+                asset_dir = assets_root / message.id
+                asset_dir.mkdir(parents=True, exist_ok=True)
+                target = asset_dir / _safe_name(
+                    message.id + "_emoticon" + extension,
+                    message.id + extension,
+                )
+                target.write_bytes(data)
+                return AssetRecord(
+                    id=f"asset-{_hash_bytes(data)[:12]}", message_id=message.id,
+                    kind=message.kind.value, status="packaged_remote",
+                    relative_path=target.relative_to(assets_root.parent).as_posix(),
+                    media_type=media_type, size=len(data), sha256=_hash_bytes(data),
+                    original_name=None,
+                )
+            except (OSError, ValueError, urllib.error.URLError):
+                continue
+        return None
+
+    def _package_v2_preview(
+        self, message: NormalizedMessage, source: Path, assets_root: Path
+    ) -> AssetRecord | None:
+        if self.image_aes_key is None:
+            return None
+        index = self._media_index()
+        for suffix in ("_t.dat", "_h.dat"):
+            preview_source = source.with_name(source.stem + suffix)
+            if (
+                not preview_source.is_file()
+                or index is None
+                or not index.authorized(preview_source)
+            ):
+                continue
+            try:
+                encoded = preview_source.read_bytes()
+                xor_key = _derive_v2_xor_key(preview_source) or self.image_xor_key
+                decoded = decrypt_v2_image(encoded, self.image_aes_key, xor_key)
+            except (OSError, ValueError, ImportError):
+                continue
+            detected = _detect_image(decoded)
+            if detected is None or detected[0] == ".wxgf":
+                continue
+            extension, media_type = detected
+            asset_dir = assets_root / message.id
+            asset_dir.mkdir(parents=True, exist_ok=True)
+            target = asset_dir / _safe_name(
+                source.stem + "_preview" + extension,
+                message.id + "_preview" + extension,
+            )
+            target.write_bytes(decoded)
+            return AssetRecord(
+                id=f"asset-{_hash_bytes(decoded)[:12]}-preview",
+                message_id=message.id, kind=message.kind.value,
+                status="packaged_preview",
+                relative_path=target.relative_to(assets_root.parent).as_posix(),
+                media_type=media_type, size=len(decoded),
+                sha256=_hash_bytes(decoded), original_name=preview_source.name,
+            )
+        return None
 
     def _resolve_voice(self, message: NormalizedMessage,
                        assets_root: Path) -> AssetRecord | None:
