@@ -24,15 +24,24 @@ nontechnical user to install Python or packages manually.
    authorization for the exact read-only method and databases reported by the tool.
 5. List conversations and preview counts before reading bodies. Resolve duplicate
    display names with opaque conversation IDs; do not expose internal usernames.
+   Treat every `message_N.db` containing the selected `Msg_<md5>` table as one
+   conversation: merge chronologically and deduplicate by stable message ID.
+   Map ordinary-language media requests strictly: `图片` means image messages
+   only; `表情` means emoticon messages only; `视频` means playable original
+   video only; and `视频封面` means the video's image thumbnail only. Never add
+   neighboring media kinds merely because their files share an image extension.
 6. Export only the approved scope. Attachments and image-key discovery require
    separate confirmation. Remote media completion requires another explicit
    network confirmation and stays disabled otherwise. Preserve the original
    database and media files unchanged.
 7. Return a clickable ZIP link and a short summary of included and excluded counts.
+   For mixed or large attachment exports, prefer separate media ZIPs while keeping
+   every selected media message and its attachment mapping in the records ZIP.
    Translate failures into plain language with one safe next action; keep raw
    diagnostics redacted and never make the user debug a command line.
 8. Report missing, expired, or unsupported media explicitly rather than silently
-   omitting it.
+   omitting it. Never report `not_found` when a targeted media directory could not
+   be read completely; use `index_incomplete` and one safe next action instead.
 
 Read [references/security-modes.md](references/security-modes.md) before any key or process operation. Read [references/export-contract.md](references/export-contract.md) when producing an export.
 Read [references/discovery.md](references/discovery.md) when discovery returns multiple, stale, or no account candidates.

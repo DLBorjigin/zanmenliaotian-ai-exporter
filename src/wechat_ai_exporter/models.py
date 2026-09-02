@@ -78,3 +78,5 @@ class NormalizedMessage:
     content: str
     sequence: int
     metadata: dict[str, object] = field(default_factory=dict)
+    sender_identity_status: str = "unknown"
+    direction_source: str = "unknown"

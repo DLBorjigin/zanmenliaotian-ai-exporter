@@ -14,7 +14,8 @@ from wechat_ai_exporter.models import Conversation, ExportScope, MessageKind, No
 
 
 def message(kind: MessageKind, content: str = "", packed_info=None,
-            local_id: int = 10, server_id: int = 20) -> NormalizedMessage:
+            local_id: int = 10, server_id: int = 20,
+            table: str = "Msg_test") -> NormalizedMessage:
     return NormalizedMessage(
         id=f"message-{kind.value}", conversation_id="conversation-test",
         timestamp=1_700_000_000, sender_name="Alice", is_self=False,
@@ -22,12 +23,35 @@ def message(kind: MessageKind, content: str = "", packed_info=None,
         sequence=1,
         metadata={
             "local_id": local_id, "server_id": server_id,
-            "table": "Msg_test", "packed_info": packed_info,
+            "table": table, "packed_info": packed_info,
         },
     )
 
 
 class MediaTests(unittest.TestCase):
+    def test_large_unrelated_tree_is_bypassed_by_conversation_shard(self) -> None:
+        token = "90909090909090909090909090909090"
+        shard = "1234567890abcdef1234567890abcdef"
+        plaintext = b"\x89PNG\r\n\x1a\n" + b"target"
+        encrypted = bytes(value ^ 0x44 for value in plaintext)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            unrelated = root / "msg" / "attach" / "unrelated"
+            unrelated.mkdir(parents=True)
+            for index in range(250):
+                (unrelated / f"irrelevant-{index}.dat").write_bytes(b"x")
+            source = root / "msg" / "attach" / shard / "2026-08" / "Img" / f"{token}.dat"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(encrypted)
+            resolver = MediaResolver(root)
+            result = resolver.resolve(
+                message(MessageKind.IMAGE, token, table="Msg_" + shard),
+                root / "out" / "assets",
+            )[0]
+            self.assertEqual(result.status, "packaged")
+            self.assertIsNotNone(resolver._index)
+            self.assertEqual(resolver._index.files_scanned, 1)
+
     def test_remote_media_host_allowlist_is_exact(self) -> None:
         self.assertTrue(_allowed_remote_media_host("wxapp.tc.qq.com"))
         self.assertTrue(_allowed_remote_media_host("emoji.qpic.cn"))
@@ -154,12 +178,103 @@ class MediaTests(unittest.TestCase):
             source = root / "msg" / "attach" / "x" / "Video" / f"{token}.jpg"
             source.parent.mkdir(parents=True)
             source.write_bytes(b"\xff\xd8\xffvideo-thumb\xff\xd9")
-            result = MediaResolver(root).resolve(
+            original = MediaResolver(root).resolve(
                 message(MessageKind.VIDEO, token), root / "out" / "assets"
+            )[0]
+            self.assertEqual(original.status, "video_original_not_found")
+            self.assertIsNone(original.relative_path)
+            result = MediaResolver(root, video_asset="thumbnail").resolve(
+                message(MessageKind.VIDEO, token), root / "thumb" / "assets"
             )[0]
             self.assertEqual(result.status, "packaged_thumbnail_only")
             self.assertEqual(result.media_type, "image/jpeg")
             self.assertTrue(result.relative_path.startswith("assets/videos/"))
+
+    def test_video_original_does_not_include_thumbnail(self) -> None:
+        token = "34343434343434343434343434343434"
+        video = b"\x00\x00\x00\x18ftypisom" + b"synthetic-video"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "msg" / "attach" / "x" / "Video"
+            folder.mkdir(parents=True)
+            (folder / f"{token}.mp4").write_bytes(video)
+            (folder / f"{token}.jpg").write_bytes(b"\xff\xd8\xffthumb")
+            results = MediaResolver(root, video_asset="original").resolve(
+                message(MessageKind.VIDEO, token), root / "out" / "assets"
+            )
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].status, "packaged")
+            self.assertEqual(results[0].media_type, "video/mp4")
+            self.assertTrue(results[0].relative_path.endswith(".mp4"))
+
+    def test_remote_video_original_is_signature_validated(self) -> None:
+        video = b"\x00\x00\x00\x18ftypisom" + b"remote-video"
+        xml = '<videomsg cdnvideourl="https://wxapp.tc.qq.com/video/example" />'
+
+        class Response:
+            headers = {"Content-Length": str(len(video))}
+
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def geturl(self): return "https://wxapp.tc.qq.com/video/example"
+            def read(self, _limit): return video
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with mock.patch("urllib.request.urlopen", return_value=Response()):
+                result = MediaResolver(
+                    root, allow_remote_media_download=True, video_asset="original"
+                ).resolve(message(MessageKind.VIDEO, xml), root / "out" / "assets")[0]
+            self.assertEqual(result.status, "packaged_remote")
+            self.assertEqual(result.media_type, "video/mp4")
+            self.assertTrue(result.relative_path.startswith("assets/videos/"))
+
+    def test_remote_video_can_use_message_aes_ecb_key(self) -> None:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        key = b"0123456789abcdef"
+        video = b"\x00\x00\x00\x18ftypisom" + b"encrypted-video"
+        pad = 16 - len(video) % 16
+        encryptor = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+        encrypted = encryptor.update(video + bytes([pad]) * pad) + encryptor.finalize()
+        xml = (
+            '<videomsg cdnvideourl="https://wxapp.tc.qq.com/video/encrypted" '
+            f'aeskey="{key.hex()}" />'
+        )
+
+        class Response:
+            headers = {"Content-Length": str(len(encrypted))}
+
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def geturl(self): return "https://wxapp.tc.qq.com/video/encrypted"
+            def read(self, _limit): return encrypted
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with mock.patch("urllib.request.urlopen", return_value=Response()):
+                result = MediaResolver(
+                    root, allow_remote_media_download=True, video_asset="original"
+                ).resolve(message(MessageKind.VIDEO, xml), root / "out" / "assets")[0]
+            self.assertEqual(result.status, "packaged_remote")
+            self.assertEqual((root / "out" / result.relative_path).read_bytes(), video)
+
+    def test_legacy_hex_video_token_requires_wechat_client(self) -> None:
+        xml = (
+            '<videomsg cdnvideourl="3057020100044b304902010002043904" '
+            'aeskey="00112233445566778899aabbccddeeff" />'
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            offline = MediaResolver(root).resolve(
+                message(MessageKind.VIDEO, xml), root / "offline" / "assets"
+            )[0]
+            self.assertEqual(offline.status, "video_remote_download_not_authorized")
+            online = MediaResolver(
+                root, allow_remote_media_download=True
+            ).resolve(message(MessageKind.VIDEO, xml), root / "online" / "assets")[0]
+            self.assertEqual(online.status, "video_cdn_requires_wechat_client")
+            self.assertIsNone(online.relative_path)
 
     def test_file_is_matched_by_exact_xml_title(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -323,6 +438,7 @@ class MediaTests(unittest.TestCase):
             result = export_chat(
                 Dataset(), ExportScope(normalized.conversation_id, include=frozenset({MessageKind.IMAGE})),
                 root / "exports", media_resolver=MediaResolver(root / "account"),
+                split_asset_bundles=False,
             )
             with zipfile.ZipFile(result.archive) as archive:
                 assets = [name for name in archive.namelist() if name.startswith("assets/")]
@@ -331,6 +447,49 @@ class MediaTests(unittest.TestCase):
                 self.assertTrue(assets[0].startswith("assets/images/"))
                 self.assertEqual(archive.read(assets[0]), plaintext)
                 self.assertEqual(manifest["assets"][0]["status"], "packaged")
+
+    def test_default_split_asset_bundle_keeps_image_message_in_core_records(self) -> None:
+        token = "22222222222222222222222222222222"
+        plaintext = b"\x89PNG\r\n\x1a\n" + b"separate-png"
+        encrypted = bytes(value ^ 0x21 for value in plaintext)
+        normalized = message(MessageKind.IMAGE, token)
+        conversation = Conversation(
+            id=normalized.conversation_id, display_name="Test", conversation_type="direct",
+            last_timestamp=normalized.timestamp, layout="weixin-4", database=Path("unused"),
+            table="Msg_test", selector="test",
+        )
+
+        class Dataset:
+            def resolve(self, _conversation_id):
+                return conversation
+
+            def iter_messages(self, _scope, limit):
+                yield normalized
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "account" / "msg" / "attach" / "x" / "Img" / f"{token}.dat"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(encrypted)
+            result = export_chat(
+                Dataset(), ExportScope(normalized.conversation_id, include=frozenset({MessageKind.IMAGE})),
+                root / "exports", media_resolver=MediaResolver(root / "account"),
+            )
+            self.assertIn("images", result.asset_archives)
+            with zipfile.ZipFile(result.archive) as core:
+                self.assertFalse(any(name.startswith("assets/") for name in core.namelist()))
+                payload = json.loads(core.read("messages.json"))
+                self.assertEqual(payload["messages"][0]["kind"], "image")
+                self.assertTrue(payload["messages"][0]["assets"][0]["relative_path"].startswith("assets/images/"))
+                manifest = json.loads(core.read("manifest.json"))
+                self.assertEqual(manifest["asset_delivery"]["mode"], "separate_archives")
+            with zipfile.ZipFile(result.asset_archives["images"]) as media:
+                asset_name = next(name for name in media.namelist() if name.startswith("assets/images/"))
+                self.assertEqual(media.read(asset_name), plaintext)
+            output_files = sorted(path.name for path in (root / "exports").iterdir())
+            self.assertEqual(len(output_files), 2)
+            self.assertTrue(any(name.endswith("-records.zip") for name in output_files))
+            self.assertTrue(any(name.endswith("-images.zip") for name in output_files))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import hashlib
 import html
 import os
@@ -8,7 +9,6 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +27,7 @@ IMAGE_MAGICS = (
     (b"BM", ".bmp", "image/bmp"),
     (b"II*\x00", ".tif", "image/tiff"),
 )
+VIDEO_ASSET_CHOICES = frozenset({"original", "thumbnail", "both"})
 
 ASSET_KIND_DIRECTORIES = {
     MessageKind.IMAGE: "images",
@@ -82,6 +83,16 @@ def _detect_image(data: bytes) -> tuple[str, str] | None:
     return None
 
 
+def _detect_video(data: bytes) -> tuple[str, str] | None:
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return ".mp4", "video/mp4"
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return ".mkv", "video/x-matroska"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"AVI ":
+        return ".avi", "video/x-msvideo"
+    return None
+
+
 def _allowed_remote_media_host(hostname: str) -> bool:
     hostname = hostname.casefold().rstrip(".")
     return (
@@ -94,6 +105,21 @@ def _allowed_remote_media_host(hostname: str) -> bool:
 def _asset_dir(assets_root: Path, message: NormalizedMessage) -> Path:
     category = ASSET_KIND_DIRECTORIES.get(message.kind, "other")
     return assets_root / category / message.id
+
+
+def _decrypt_aes_ecb_media(data: bytes, key: bytes | bytearray) -> bytes | None:
+    if len(key) != 16 or not data or len(data) % 16:
+        return None
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        decryptor = Cipher(algorithms.AES(bytes(key)), modes.ECB()).decryptor()
+        decoded = decryptor.update(data) + decryptor.finalize()
+    except (ImportError, ValueError):
+        return None
+    pad = decoded[-1]
+    if not 1 <= pad <= 16 or decoded[-pad:] != bytes([pad]) * pad:
+        return None
+    return decoded[:-pad]
 
 
 def decode_legacy_xor(data: bytes) -> tuple[bytes, str, str] | None:
@@ -161,48 +187,118 @@ def decrypt_v2_image(data: bytes, aes_key: bytes | bytearray,
 
 
 class MediaIndex:
-    def __init__(self, account_root: Path, max_files: int = 200_000,
-                 time_budget_seconds: float = 15.0,
+    def __init__(self, account_root: Path,
                  include_emoticons: bool = False) -> None:
         self.account_root = account_root.resolve(strict=True)
-        self.max_files = max_files
-        self.time_budget_seconds = time_budget_seconds
         self.include_emoticons = include_emoticons
         self.by_name: dict[str, list[Path]] = {}
         self.by_token: dict[str, list[Path]] = {}
         self.files_scanned = 0
-        self.timed_out = False
-        self._build()
+        self._scanned_roots: set[Path] = set()
+        self.last_query_complete = True
 
-    def _build(self) -> None:
-        roots = [
-            self.account_root / name
-            for name in ("msg", "resource", "FileStorage", "MsgAttach", "CustomEmotion")
-            if (self.account_root / name).is_dir()
-        ]
-        emoticon_root = self.account_root / "business" / "emoticon"
-        if self.include_emoticons and emoticon_root.is_dir():
-            roots.append(emoticon_root)
-        cache_root = self.account_root / "cache"
-        if self.include_emoticons and cache_root.is_dir():
-            roots.append(cache_root)
-        started = time.monotonic()
+    @staticmethod
+    def _deduplicate_roots(roots: list[Path]) -> list[Path]:
+        result: list[Path] = []
         for root in roots:
-            for current, directories, files in os.walk(root, followlinks=False):
+            try:
+                resolved = root.resolve(strict=True)
+            except OSError:
+                continue
+            if not resolved.is_dir() or resolved in result:
+                continue
+            result.append(resolved)
+        return result
+
+    def _roots_for(self, message: NormalizedMessage) -> tuple[list[Path], list[Path]]:
+        month = datetime.fromtimestamp(message.timestamp).strftime("%Y-%m")
+        table = str(message.metadata.get("table") or "")
+        shard_match = re.fullmatch(r"(?i)Msg_([0-9a-f]{32})", table)
+        shard = shard_match.group(1).casefold() if shard_match else None
+        msg = self.account_root / "msg"
+        cache = self.account_root / "cache"
+        preferred: list[Path] = []
+        fallback: list[Path] = []
+        if message.kind == MessageKind.IMAGE:
+            if shard:
+                preferred.extend((
+                    msg / "attach" / shard,
+                    cache / month / "Message" / shard,
+                    self.account_root / "MsgAttach" / shard,
+                ))
+            fallback.extend((
+                msg / "attach", self.account_root / "resource",
+                self.account_root / "FileStorage" / "Image",
+            ))
+        elif message.kind == MessageKind.VIDEO:
+            preferred.append(msg / "video" / month)
+            if shard:
+                preferred.extend((
+                    msg / "attach" / shard,
+                    cache / month / "Message" / shard,
+                ))
+            fallback.extend((msg / "video", msg / "attach"))
+        elif message.kind == MessageKind.FILE:
+            preferred.append(msg / "file" / month)
+            if shard:
+                preferred.extend((
+                    msg / "attach" / shard,
+                    cache / month / "Message" / shard,
+                ))
+            fallback.extend((
+                msg / "file", msg / "attach",
+                self.account_root / "FileStorage" / "File",
+            ))
+        elif message.kind == MessageKind.EMOTICON and self.include_emoticons:
+            preferred.extend((
+                self.account_root / "business" / "emoticon" / "Persist",
+                self.account_root / "CustomEmotion",
+            ))
+            fallback.extend((
+                self.account_root / "business" / "emoticon",
+                cache / month,
+            ))
+        return self._deduplicate_roots(preferred), self._deduplicate_roots(fallback)
+
+    def _scan_root(self, root: Path) -> bool:
+        if root in self._scanned_roots:
+            return True
+        errors: list[OSError] = []
+        try:
+            for current, directories, files in os.walk(
+                root, followlinks=False, onerror=errors.append
+            ):
                 directories[:] = [
                     name for name in directories
-                    if name.casefold() not in {"cache", "temp", ".git"}
+                    if name.casefold() not in {"temp", ".git"}
                     and not (Path(current) / name).is_symlink()
+                    and (Path(current) / name).resolve(strict=False) not in self._scanned_roots
                 ]
                 for filename in files:
-                    if self.files_scanned >= self.max_files or time.monotonic() - started >= self.time_budget_seconds:
-                        self.timed_out = True
-                        return
                     path = Path(current) / filename
                     self.files_scanned += 1
                     self.by_name.setdefault(filename.casefold(), []).append(path)
                     for token in re.findall(r"(?i)[0-9a-f]{16,64}", filename):
                         self.by_token.setdefault(token.casefold(), []).append(path)
+        except OSError:
+            errors.append(OSError("media directory traversal failed"))
+        complete = not errors
+        if complete:
+            self._scanned_roots.add(root)
+        return complete
+
+    def prepare(self, message: NormalizedMessage, filenames: set[str],
+                tokens: set[str]) -> None:
+        self.last_query_complete = True
+        preferred, fallback = self._roots_for(message)
+        for root in preferred:
+            self.last_query_complete = self._scan_root(root) and self.last_query_complete
+        has_match = any(
+            self.by_name.get(Path(name).name.casefold()) for name in filenames
+        ) or any(self.by_token.get(token) for token in tokens)
+        if not has_match:
+            for root in fallback:
+                self.last_query_complete = self._scan_root(root) and self.last_query_complete
 
     def authorized(self, path: Path) -> bool:
         try:
@@ -218,7 +314,8 @@ class MediaResolver:
                  image_aes_key: bytearray | None = None,
                  image_xor_key: int | None = None,
                  include_emoticons: bool = False,
-                 allow_remote_media_download: bool = False) -> None:
+                 allow_remote_media_download: bool = False,
+                 video_asset: str = "original") -> None:
         self.account_root = Path(account_root) if account_root else None
         self.media_databases = [Path(item) for item in (media_databases or [])]
         self.max_asset_bytes = max_asset_bytes
@@ -226,6 +323,9 @@ class MediaResolver:
         self.image_xor_key = image_xor_key
         self.include_emoticons = include_emoticons
         self.allow_remote_media_download = allow_remote_media_download
+        if video_asset not in VIDEO_ASSET_CHOICES:
+            raise ValueError(f"invalid video asset mode: {video_asset}")
+        self.video_asset = video_asset
         self._index: MediaIndex | None = None
 
     def _media_index(self) -> MediaIndex | None:
@@ -250,9 +350,12 @@ class MediaResolver:
         index = self._media_index()
         if index is None:
             return [self._status(message, "media_root_unavailable")]
+        if message.kind == MessageKind.VIDEO:
+            return self._resolve_video(message, index, assets_root)
         candidates = self._candidates(message, index)
         if not candidates:
-            return [self._status(message, "not_found")]
+            status = "not_found" if index.last_query_complete else "index_incomplete"
+            return [self._status(message, status)]
         top_score = candidates[0][0]
         top = sorted({path for score, path in candidates if score == top_score})
         if len(top) > 1 and self._all_files_identical(top):
@@ -278,6 +381,76 @@ class MediaResolver:
             if preview is not None:
                 records.append(preview)
         return records
+
+    def _resolve_video(
+        self, message: NormalizedMessage, index: MediaIndex, assets_root: Path
+    ) -> list[AssetRecord]:
+        candidates = self._candidates(message, index)
+        originals = [
+            (score, path) for score, path in candidates
+            if self._path_media_kind(path) == "video"
+        ]
+        thumbnails = [
+            (score, path) for score, path in candidates
+            if self._path_media_kind(path) == "image"
+        ]
+        records: list[AssetRecord] = []
+        if self.video_asset in {"original", "both"}:
+            selected = self._unique_top_path(originals)
+            if selected == "ambiguous":
+                records.append(self._status(message, "ambiguous_video_original"))
+            elif isinstance(selected, Path):
+                records.append(self._package_path(message, selected, assets_root))
+            elif not index.last_query_complete:
+                records.append(self._status(message, "video_index_incomplete"))
+            else:
+                reference_kind = self._remote_video_reference_kind(message)
+                if self.allow_remote_media_download:
+                    remote = self._package_remote_video(message, assets_root)
+                    records.append(
+                        remote or self._status(message, "video_original_not_found")
+                    )
+                elif reference_kind is not None:
+                    records.append(
+                        self._status(message, "video_remote_download_not_authorized")
+                    )
+                else:
+                    records.append(self._status(message, "video_original_not_found"))
+        if self.video_asset in {"thumbnail", "both"}:
+            selected = self._unique_top_path(thumbnails)
+            if selected == "ambiguous":
+                records.append(self._status(message, "ambiguous_video_thumbnail"))
+            elif isinstance(selected, Path):
+                records.append(self._package_path(message, selected, assets_root))
+            elif not index.last_query_complete:
+                records.append(self._status(message, "video_thumbnail_index_incomplete"))
+            else:
+                records.append(self._status(message, "video_thumbnail_not_found"))
+        return records
+
+    def _unique_top_path(
+        self, candidates: list[tuple[int, Path]]
+    ) -> Path | str | None:
+        if not candidates:
+            return None
+        top_score = candidates[0][0]
+        top = sorted({path for score, path in candidates if score == top_score})
+        if len(top) > 1 and self._all_files_identical(top):
+            top = [top[0]]
+        return top[0] if len(top) == 1 else "ambiguous"
+
+    @staticmethod
+    def _path_media_kind(path: Path) -> str:
+        try:
+            with path.open("rb") as handle:
+                header = handle.read(16)
+        except OSError:
+            return "unknown"
+        if _detect_video(header):
+            return "video"
+        if _detect_image(header):
+            return "image"
+        return "unknown"
 
     @staticmethod
     def _all_files_identical(paths: list[Path]) -> bool:
@@ -334,10 +507,11 @@ class MediaResolver:
             if candidate.is_file() and index.authorized(candidate):
                 scores[candidate] = max(scores.get(candidate, 0), 120)
             filenames.add(Path(path_text.replace("\\", "/")).name)
+        tokens = set(match.casefold() for match in re.findall(r"(?i)[0-9a-f]{16,64}", text))
+        index.prepare(message, filenames, tokens)
         for filename in filenames:
             for path in index.by_name.get(Path(filename).name.casefold(), []):
                 scores[path] = max(scores.get(path, 0), 100)
-        tokens = set(match.casefold() for match in re.findall(r"(?i)[0-9a-f]{16,64}", text))
         for token in tokens:
             for path in index.by_token.get(token, []):
                 scores[path] = max(scores.get(path, 0), 80)
@@ -432,9 +606,12 @@ class MediaResolver:
         name = _safe_name(source.name, message.id + source.suffix)
         try:
             with source.open("rb") as handle:
-                detected = _detect_image(handle.read(16))
+                header = handle.read(16)
+                detected = _detect_image(header)
+                detected_video = _detect_video(header)
         except OSError:
             detected = None
+            detected_video = None
         if message.kind == MessageKind.EMOTICON and detected is None:
             return self._status(message, "unsupported_emoticon_format", source.name)
         target = asset_dir / name
@@ -444,16 +621,108 @@ class MediaResolver:
         media_type = detected[1] if detected else None
         if message.kind == MessageKind.VIDEO and detected is not None:
             status = "packaged_thumbnail_only"
-        elif message.kind == MessageKind.VIDEO and source.suffix.casefold() in {
-            ".mp4", ".m4v", ".mov",
-        }:
-            media_type = "video/mp4"
+        elif message.kind == MessageKind.VIDEO and detected_video is not None:
+            media_type = detected_video[1]
         return AssetRecord(
             id=f"asset-{_hash_file(target)[:12]}", message_id=message.id,
             kind=message.kind.value, status=status, relative_path=relative,
             media_type=media_type, size=target.stat().st_size, sha256=_hash_file(target),
             original_name=source.name,
         )
+
+    def _fetch_remote_blob(self, raw_url: str) -> bytes | None:
+        try:
+            parsed = urllib.parse.urlsplit(raw_url)
+            hostname = (parsed.hostname or "").casefold()
+            if parsed.scheme not in {"http", "https"} or not _allowed_remote_media_host(hostname):
+                return None
+            if parsed.scheme == "http":
+                parsed = parsed._replace(scheme="https")
+            request = urllib.request.Request(
+                urllib.parse.urlunsplit(parsed),
+                headers={"User-Agent": "wechat-ai-exporter/1"},
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                final_host = (urllib.parse.urlsplit(response.geturl()).hostname or "").casefold()
+                if not _allowed_remote_media_host(final_host):
+                    return None
+                declared = response.headers.get("Content-Length")
+                if declared and int(declared) > self.max_asset_bytes:
+                    return None
+                data = response.read(self.max_asset_bytes + 1)
+            return data if len(data) <= self.max_asset_bytes else None
+        except (OSError, ValueError, urllib.error.URLError):
+            return None
+
+    def _remote_video_reference_kind(self, message: NormalizedMessage) -> str | None:
+        text = html.unescape(self._metadata_text(message))
+        for name in ("cdnvideourl", "cdnrawvideourl"):
+            match = re.search(rf'(?is)\b{name}\s*=\s*["\']([^"\']+)["\']', text)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            parsed = urllib.parse.urlsplit(value)
+            if parsed.scheme in {"http", "https"} and parsed.hostname:
+                return "direct_url"
+            if len(value) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", value):
+                return "legacy_client_token"
+        return None
+
+    def _package_remote_video(
+        self, message: NormalizedMessage, assets_root: Path
+    ) -> AssetRecord | None:
+        text = html.unescape(self._metadata_text(message))
+        urls = []
+        for name in ("cdnvideourl", "cdnrawvideourl"):
+            match = re.search(rf'(?is)\b{name}\s*=\s*["\']([^"\']+)["\']', text)
+            if match:
+                urls.append(match.group(1).strip())
+        keys: list[bytearray] = []
+        for name in ("aeskey", "cdnrawvideoaeskey"):
+            match = re.search(rf'(?is)\b{name}\s*=\s*["\']([0-9a-f]{{32}})["\']', text)
+            if match:
+                candidate = bytearray.fromhex(match.group(1))
+                if not any(candidate == existing for existing in keys):
+                    keys.append(candidate)
+        try:
+            for raw_url in urls:
+                data = self._fetch_remote_blob(raw_url)
+                if data is None:
+                    continue
+                variants = [data]
+                variants.extend(
+                    decoded for key in keys
+                    if (decoded := _decrypt_aes_ecb_media(data, key)) is not None
+                )
+                for decoded in variants:
+                    detected = _detect_video(decoded)
+                    if detected is None:
+                        continue
+                    extension, media_type = detected
+                    asset_dir = _asset_dir(assets_root, message)
+                    asset_dir.mkdir(parents=True, exist_ok=True)
+                    target = asset_dir / _safe_name(
+                        message.id + "_video" + extension,
+                        message.id + extension,
+                    )
+                    target.write_bytes(decoded)
+                    return AssetRecord(
+                        id=f"asset-{_hash_bytes(decoded)[:12]}",
+                        message_id=message.id, kind=message.kind.value,
+                        status="packaged_remote", relative_path=target.relative_to(
+                            assets_root.parent
+                        ).as_posix(), media_type=media_type, size=len(decoded),
+                        sha256=_hash_bytes(decoded), original_name=None,
+                    )
+        finally:
+            for key in keys:
+                key[:] = b"\x00" * len(key)
+        reference_kind = self._remote_video_reference_kind(message)
+        if reference_kind == "legacy_client_token":
+            return self._status(message, "video_cdn_requires_wechat_client")
+        if reference_kind == "direct_url":
+            return self._status(message, "video_remote_download_failed")
+        return None
 
     def _package_remote_emoticon(
         self, message: NormalizedMessage, assets_root: Path
@@ -466,25 +735,8 @@ class MediaResolver:
                 urls.append(match.group(1).strip())
         for raw_url in urls:
             try:
-                parsed = urllib.parse.urlsplit(raw_url)
-                hostname = (parsed.hostname or "").casefold()
-                if parsed.scheme not in {"http", "https"} or not _allowed_remote_media_host(hostname):
-                    continue
-                if parsed.scheme == "http":
-                    parsed = parsed._replace(scheme="https")
-                url = urllib.parse.urlunsplit(parsed)
-                request = urllib.request.Request(
-                    url, headers={"User-Agent": "wechat-ai-exporter/1"}
-                )
-                with urllib.request.urlopen(request, timeout=15) as response:
-                    final_host = (urllib.parse.urlsplit(response.geturl()).hostname or "").casefold()
-                    if not _allowed_remote_media_host(final_host):
-                        continue
-                    declared = response.headers.get("Content-Length")
-                    if declared and int(declared) > self.max_asset_bytes:
-                        continue
-                    data = response.read(self.max_asset_bytes + 1)
-                if len(data) > self.max_asset_bytes:
+                data = self._fetch_remote_blob(raw_url)
+                if data is None:
                     continue
                 detected = _detect_image(data)
                 if detected is None or detected[0] == ".wxgf":

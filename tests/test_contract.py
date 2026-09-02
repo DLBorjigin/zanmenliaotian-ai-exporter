@@ -165,6 +165,19 @@ class ContractTests(unittest.TestCase):
         ])
         self.assertEqual(args.message_database, ["message_0.db", "message_1.db"])
 
+    def test_video_asset_defaults_to_original_and_thumbnail_is_explicit(self) -> None:
+        base = [
+            "export-auto-key", "--message-database", "message.db",
+            "--session-database", "session.db", "--contact-database", "contact.db",
+            "--snapshot-dir", "snapshots", "--work-dir", "work",
+            "--conversation-id", "conversation-test", "--output-dir", "out",
+        ]
+        self.assertEqual(build_parser().parse_args(base).video_asset, "original")
+        self.assertEqual(
+            build_parser().parse_args(base + ["--video-asset", "thumbnail"]).video_asset,
+            "thumbnail",
+        )
+
     def test_onboard_reports_one_safe_next_action_without_content_access(self) -> None:
         discovery_payload = {
             "installations": [{"running": True, "version": "4.1.12.55"}],

@@ -27,6 +27,8 @@ class ExportResult:
     message_count: int
     counts_by_kind: dict[str, int]
     sha256: str
+    asset_archives: dict[str, Path]
+    asset_archive_sha256: dict[str, str]
 
 
 def _sha256(path: Path) -> str:
@@ -83,6 +85,7 @@ def _markdown_content(message: NormalizedMessage, assets: list[AssetRecord]) -> 
 
 
 def _message_dict(message: NormalizedMessage, assets: list[AssetRecord]) -> dict[str, object]:
+    direction = "self" if message.is_self is True else "other" if message.is_self is False else "unknown"
     return {
         "id": message.id,
         "conversation_id": message.conversation_id,
@@ -90,6 +93,12 @@ def _message_dict(message: NormalizedMessage, assets: list[AssetRecord]) -> dict
         "timestamp_utc": datetime.fromtimestamp(message.timestamp, timezone.utc).isoformat(),
         "sender": message.sender_name,
         "is_self": message.is_self,
+        "sender_attribution": {
+            "display_name": message.sender_name,
+            "identity_status": message.sender_identity_status,
+            "direction": direction,
+            "direction_source": message.direction_source,
+        },
         "kind": message.kind.value,
         "type_code": message.type_code,
         "subtype_code": message.subtype_code,
@@ -101,20 +110,26 @@ def _message_dict(message: NormalizedMessage, assets: list[AssetRecord]) -> dict
 
 def export_chat(dataset: ChatDataset, scope: ExportScope, output_directory: Path,
                 limit: int = 100_000,
-                media_resolver: MediaResolver | None = None) -> ExportResult:
+                media_resolver: MediaResolver | None = None,
+                split_asset_bundles: bool = True) -> ExportResult:
     conversation = dataset.resolve(scope.conversation_id)
     output_directory = output_directory.resolve(strict=False)
     output_directory.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
     staging = output_directory / f".wechat-export-{token}"
     partial_archive = output_directory / f".wechat-export-{token}.zip.partial"
+    export_stem = f"wechat-chat-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{token[:6]}"
     final_archive = output_directory / (
-        f"wechat-chat-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{token[:6]}.zip"
+        export_stem + ("-records.zip" if split_asset_bundles else ".zip")
     )
     staging.mkdir()
     counts: Counter[str] = Counter()
     message_count = 0
     asset_records: list[AssetRecord] = []
+    asset_archives: dict[str, Path] = {}
+    asset_archive_sha256: dict[str, str] = {}
+    partial_asset_archives: dict[str, Path] = {}
+    published: list[Path] = []
     try:
         transcript = staging / "transcript.md"
         messages_json = staging / "messages.json"
@@ -149,6 +164,35 @@ def export_chat(dataset: ChatDataset, scope: ExportScope, output_directory: Path
                 message_count += 1
             structured.write("]}\n")
 
+        asset_delivery: dict[str, object] = {"mode": "embedded"}
+        assets_root = staging / "assets"
+        if split_asset_bundles and assets_root.is_dir():
+            bundles: dict[str, dict[str, object]] = {}
+            for category in sorted(path for path in assets_root.iterdir() if path.is_dir()):
+                if not any(path.is_file() for path in category.rglob("*")):
+                    continue
+                final_asset = output_directory / f"{export_stem}-{category.name}.zip"
+                partial_asset = output_directory / f".{export_stem}-{category.name}.zip.partial"
+                with zipfile.ZipFile(
+                    partial_asset, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+                ) as archive:
+                    for path in sorted(item for item in category.rglob("*") if item.is_file()):
+                        archive.write(path, path.relative_to(staging).as_posix())
+                digest = _sha256(partial_asset)
+                asset_archives[category.name] = final_asset
+                asset_archive_sha256[category.name] = digest
+                partial_asset_archives[category.name] = partial_asset
+                bundles[category.name] = {
+                    "file": final_asset.name,
+                    "sha256": digest,
+                    "size": partial_asset.stat().st_size,
+                }
+            asset_delivery = {
+                "mode": "separate_archives",
+                "instructions": "Extract the records ZIP and selected media ZIPs into the same folder.",
+                "bundles": bundles,
+            }
+
         manifest = {
             "schema_version": 1,
             "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -163,10 +207,12 @@ def export_chat(dataset: ChatDataset, scope: ExportScope, output_directory: Path
                 "end_timestamp": scope.end_timestamp,
                 "included_kinds": sorted(item.value for item in scope.include),
                 "limit": max(1, min(limit, 1_000_000)),
+                "video_asset": media_resolver.video_asset if media_resolver else None,
             },
             "message_count": message_count,
             "counts_by_kind": dict(sorted(counts.items())),
             "assets": [item.to_dict() for item in asset_records],
+            "asset_delivery": asset_delivery,
             "privacy": {
                 "contains_database_key": False,
                 "contains_database_paths": False,
@@ -186,14 +232,26 @@ def export_chat(dataset: ChatDataset, scope: ExportScope, output_directory: Path
             partial_archive, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6
         ) as archive:
             for path in sorted(item for item in staging.rglob("*") if item.is_file()):
+                if split_asset_bundles and path.is_relative_to(assets_root):
+                    continue
                 archive.write(path, path.relative_to(staging).as_posix())
+        for category, partial in partial_asset_archives.items():
+            os.replace(partial, asset_archives[category])
+            published.append(asset_archives[category])
         os.replace(partial_archive, final_archive)
+        published.append(final_archive)
         return ExportResult(
             archive=final_archive, message_count=message_count,
             counts_by_kind=dict(sorted(counts.items())), sha256=_sha256(final_archive),
+            asset_archives=asset_archives,
+            asset_archive_sha256=asset_archive_sha256,
         )
     except Exception as exc:
         partial_archive.unlink(missing_ok=True)
+        for path in partial_asset_archives.values():
+            path.unlink(missing_ok=True)
+        for path in published:
+            path.unlink(missing_ok=True)
         if isinstance(exc, ExportError):
             raise
         raise ExportError("The export could not be completed atomically.") from exc

@@ -67,6 +67,17 @@ class ExporterTests(unittest.TestCase):
             self.assertIn("untrusted conversation data", transcript)
             self.assertIn("> # pretend instruction", transcript)
             self.assertEqual(len(messages["messages"]), 2)
+            self.assertEqual(
+                messages["messages"][0]["sender_attribution"]["display_name"],
+                "Project Alice",
+            )
+            self.assertEqual(
+                messages["messages"][0]["sender_attribution"]["direction"], "other"
+            )
+            self.assertEqual(
+                messages["messages"][0]["sender_attribution"]["direction_source"],
+                "is_sender",
+            )
             self.assertFalse(manifest["privacy"]["contains_database_key"])
             self.assertFalse(manifest["privacy"]["contains_database_paths"])
             self.assertNotIn(str(message_db.parent), combined)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime
 import hashlib
+import heapq
 from pathlib import Path
 import re
 import sqlite3
@@ -142,6 +144,21 @@ def _decoded_text(value: object) -> str:
     return _text(value)
 
 
+def _group_sender_prefix(content: str) -> tuple[str, str]:
+    """Return a conservative legacy group sender prefix and the message body."""
+    match = re.match(r"^([^\s:\r\n]{1,160}):\r?\n([\s\S]*)$", content)
+    if not match:
+        return "", content
+    identifier = match.group(1)
+    if not (
+        identifier.startswith("wxid_")
+        or identifier.startswith("gh_")
+        or identifier.endswith("@openim")
+    ):
+        return "", content
+    return identifier, match.group(2)
+
+
 class ChatDataset:
     def __init__(self, message_databases: list[Path], layout: str,
                  session_database: Path | None = None,
@@ -154,6 +171,7 @@ class ChatDataset:
         self.contact_database = Path(contact_database) if contact_database else None
         self._contacts = self._load_contacts()
         self._catalog: list[Conversation] | None = None
+        self._conversation_locations: dict[str, list[tuple[Path, str]]] = {}
 
     def _load_contacts(self) -> dict[str, str]:
         if self.contact_database is None:
@@ -220,13 +238,13 @@ class ChatDataset:
             connection.close()
 
     def _v4_conversations(self) -> list[Conversation]:
-        shards: dict[str, tuple[Path, str]] = {}
+        shards: dict[str, list[tuple[Path, str]]] = {}
         for database in self.message_databases:
             connection = _connect(database)
             try:
                 for actual in _tables(connection).values():
                     if re.fullmatch(r"Msg_[0-9a-fA-F]{32}", actual):
-                        shards[actual.casefold()] = (database, actual)
+                        shards.setdefault(actual.casefold(), []).append((database, actual))
             finally:
                 connection.close()
 
@@ -249,25 +267,44 @@ class ChatDataset:
                         ):
                             selector_text = _text(selector)
                             shard_key = "msg_" + hashlib.md5(selector_text.encode("utf-8")).hexdigest()
-                            shard = shards.get(shard_key)
-                            if not shard:
+                            locations = shards.get(shard_key)
+                            if not locations:
                                 continue
                             claimed.add(shard_key)
-                            result.append(self._conversation(
+                            latest = max(
+                                [normalize_timestamp(last_time)] + [
+                                    self._max_timestamp(database, shard_table, "create_time") or 0
+                                    for database, shard_table in locations
+                                ]
+                            )
+                            conversation = self._conversation(
                                 selector_text, self._contacts.get(selector_text, selector_text),
-                                shard[0], shard[1], normalize_timestamp(last_time), "weixin-4",
-                            ))
+                                locations[0][0], locations[0][1], latest, "weixin-4",
+                            )
+                            self._conversation_locations[conversation.id] = list(locations)
+                            result.append(conversation)
             finally:
                 connection.close()
-        for shard_key, (database, table) in shards.items():
+        for shard_key, locations in shards.items():
             if shard_key in claimed:
                 continue
             token = shard_key.removeprefix("msg_")[:8]
-            result.append(self._conversation(
-                shard_key, f"Unknown conversation {token}", database, table,
-                self._max_timestamp(database, table, "create_time"), "weixin-4",
-            ))
+            latest = max(
+                self._max_timestamp(database, table, "create_time") or 0
+                for database, table in locations
+            )
+            conversation = self._conversation(
+                shard_key, f"Unknown conversation {token}",
+                locations[0][0], locations[0][1], latest, "weixin-4",
+            )
+            self._conversation_locations[conversation.id] = list(locations)
+            result.append(conversation)
         return sorted(result, key=lambda item: item.last_timestamp or 0, reverse=True)
+
+    def _locations(self, conversation: Conversation) -> list[tuple[Path, str]]:
+        return self._conversation_locations.get(
+            conversation.id, [(conversation.database, conversation.table)]
+        )
 
     def _conversation(self, selector: str, display_name: str, database: Path,
                       table: str, last_timestamp: int | None, layout: str) -> Conversation:
@@ -303,43 +340,46 @@ class ChatDataset:
 
     def preview(self, scope: ExportScope) -> dict[str, object]:
         conversation = self.resolve(scope.conversation_id)
-        connection = _connect(conversation.database)
-        try:
-            columns = _columns(connection, conversation.table)
-            type_name = columns.get("type") if conversation.layout == "wechat-3" else columns.get("local_type")
-            time_name = columns.get("createtime") if conversation.layout == "wechat-3" else columns.get("create_time")
-            talker_name = columns.get("strtalker") if conversation.layout == "wechat-3" else None
-            if not type_name or not time_name:
-                raise ChatDataError("The selected message table lacks type or time columns.")
-            time_scale = self._time_scale(connection, conversation.table, time_name)
-            where, parameters = self._where(
-                scope, time_name, talker_name, conversation.selector, time_scale
-            )
-            rows = connection.execute(
-                f"SELECT {_quote(type_name)}, COUNT(*) FROM {_quote(conversation.table)} "
-                f"{where} GROUP BY {_quote(type_name)}", parameters,
-            ).fetchall()
-            counts = Counter()
-            ambiguous = 0
-            for raw_type, count in rows:
-                kind = message_kind(int(raw_type or 0), inspect_content=False)
-                if int(raw_type or 0) == 49:
-                    ambiguous += int(count)
-                counts[kind.value] += int(count)
-            included = {kind.value: counts.get(kind.value, 0) for kind in scope.include}
-            return {
-                "conversation_id": conversation.id,
-                "display_name": conversation.display_name,
-                "start_timestamp": scope.start_timestamp,
-                "end_timestamp": scope.end_timestamp,
-                "counts_by_kind": dict(sorted(counts.items())),
-                "selected_count": sum(included.values()),
-                "included_kinds": sorted(kind.value for kind in scope.include),
-                "ambiguous_link_or_file_count": ambiguous,
-                "message_bodies_read": 0,
-            }
-        finally:
-            connection.close()
+        counts = Counter()
+        ambiguous = 0
+        locations = self._locations(conversation)
+        for database, table in locations:
+            connection = _connect(database)
+            try:
+                columns = _columns(connection, table)
+                type_name = columns.get("type") if conversation.layout == "wechat-3" else columns.get("local_type")
+                time_name = columns.get("createtime") if conversation.layout == "wechat-3" else columns.get("create_time")
+                talker_name = columns.get("strtalker") if conversation.layout == "wechat-3" else None
+                if not type_name or not time_name:
+                    raise ChatDataError("The selected message table lacks type or time columns.")
+                time_scale = self._time_scale(connection, table, time_name)
+                where, parameters = self._where(
+                    scope, time_name, talker_name, conversation.selector, time_scale
+                )
+                rows = connection.execute(
+                    f"SELECT {_quote(type_name)}, COUNT(*) FROM {_quote(table)} "
+                    f"{where} GROUP BY {_quote(type_name)}", parameters,
+                ).fetchall()
+                for raw_type, count in rows:
+                    kind = message_kind(int(raw_type or 0), inspect_content=False)
+                    if int(raw_type or 0) == 49:
+                        ambiguous += int(count)
+                    counts[kind.value] += int(count)
+            finally:
+                connection.close()
+        included = {kind.value: counts.get(kind.value, 0) for kind in scope.include}
+        return {
+            "conversation_id": conversation.id,
+            "display_name": conversation.display_name,
+            "start_timestamp": scope.start_timestamp,
+            "end_timestamp": scope.end_timestamp,
+            "counts_by_kind": dict(sorted(counts.items())),
+            "selected_count": sum(included.values()),
+            "included_kinds": sorted(kind.value for kind in scope.include),
+            "ambiguous_link_or_file_count": ambiguous,
+            "message_database_shards": len(locations),
+            "message_bodies_read": 0,
+        }
 
     def _time_scale(self, connection: sqlite3.Connection, table: str, time_column: str) -> int:
         value = connection.execute(
@@ -400,12 +440,33 @@ class ChatDataset:
                 f"ORDER BY {_quote(time_name)}, rowid LIMIT ?"
             )
             for row in connection.execute(query, parameters):
+                raw_content = _text(row[7])
+                sender_flag = row[5]
+                sender = conversation.display_name
+                identity_status = "conversation"
+                sender_identifier_present = False
+                if conversation.conversation_type == "group" and not bool(sender_flag):
+                    sender_id, raw_content = _group_sender_prefix(raw_content)
+                    if sender_id:
+                        sender_identifier_present = True
+                        sender = _display_label(
+                            sender_id, self._contacts.get(sender_id, sender_id)
+                        )
+                        identity_status = (
+                            "contact" if sender_id in self._contacts else "pseudonymous"
+                        )
+                    else:
+                        sender = "Unknown sender"
+                        identity_status = "unknown"
+                normalized_row = (*row[1:7], raw_content)
                 message = self._normalize_row(
-                    conversation, row[1:8], sender=conversation.display_name,
+                    conversation, normalized_row, sender=sender,
                     metadata={
                         "local_id": int(row[0] or 0), "server_id": int(row[2] or 0),
                         "table": conversation.table, "packed_info": row[8],
                     },
+                    sender_identity_status=identity_status,
+                    sender_identifier_present=sender_identifier_present,
                 )
                 if message.kind in scope.include:
                     yield message
@@ -414,6 +475,27 @@ class ChatDataset:
 
     def _iter_v4(self, conversation: Conversation, scope: ExportScope,
                  limit: int) -> Iterator[NormalizedMessage]:
+        iterators = [
+            self._iter_v4_location(
+                replace(conversation, database=database, table=table), scope, limit
+            )
+            for database, table in self._locations(conversation)
+        ]
+        seen: set[str] = set()
+        emitted = 0
+        for message in heapq.merge(
+            *iterators, key=lambda item: (item.timestamp, item.sequence, item.id)
+        ):
+            if message.id in seen:
+                continue
+            seen.add(message.id)
+            yield message
+            emitted += 1
+            if emitted >= max(1, min(limit, 1_000_000)):
+                break
+
+    def _iter_v4_location(self, conversation: Conversation, scope: ExportScope,
+                          limit: int) -> Iterator[NormalizedMessage]:
         connection = _connect(conversation.database)
         try:
             columns = _columns(connection, conversation.table)
@@ -465,10 +547,22 @@ class ChatDataset:
             )
             for row in connection.execute(query, parameters):
                 sender_id = _text(row[12])
-                sender = _display_label(
-                    sender_id, self._contacts.get(sender_id, sender_id or conversation.display_name)
-                )
                 content = _decoded_text(row[7]) or _decoded_text(row[10])
+                if not sender_id and conversation.conversation_type == "group":
+                    sender_id, content = _group_sender_prefix(content)
+                if sender_id:
+                    sender = _display_label(
+                        sender_id, self._contacts.get(sender_id, sender_id)
+                    )
+                    identity_status = (
+                        "contact" if sender_id in self._contacts else "pseudonymous"
+                    )
+                elif conversation.conversation_type == "group":
+                    sender = "Unknown sender"
+                    identity_status = "unknown"
+                else:
+                    sender = conversation.display_name
+                    identity_status = "conversation"
                 normalized_row = (*row[1:7], content)
                 message = self._normalize_row(
                     conversation, normalized_row, sender=sender,
@@ -479,6 +573,8 @@ class ChatDataset:
                         "compress_content": _decoded_text(row[10]),
                         "origin_source": _decoded_text(row[11]),
                     },
+                    sender_identity_status=identity_status,
+                    sender_identifier_present=bool(sender_id),
                 )
                 if message.kind in scope.include:
                     yield message
@@ -486,16 +582,37 @@ class ChatDataset:
             connection.close()
 
     def _normalize_row(self, conversation: Conversation, row: tuple[object, ...],
-                       sender: str, metadata: dict[str, object]) -> NormalizedMessage:
+                       sender: str, metadata: dict[str, object],
+                       sender_identity_status: str = "unknown",
+                       sender_identifier_present: bool = False) -> NormalizedMessage:
         sequence, server_id, raw_type, subtype, sender_flag, created, raw_content = row
         content = _text(raw_content)
         type_code = int(raw_type or 0)
         kind = message_kind(type_code, content, inspect_content=True)
         if conversation.layout == "wechat-3":
-            is_self = bool(sender_flag) if sender_flag is not None else None
+            if sender_flag is not None:
+                is_self = bool(sender_flag)
+                direction_source = "is_sender"
+            elif sender_identifier_present:
+                is_self = False
+                direction_source = "message_sender_prefix"
+            else:
+                is_self = None
+                direction_source = "unknown"
         else:
             status = int(sender_flag or 0)
-            is_self = True if status == 2 else False if status == 4 else None
+            if status == 2:
+                is_self = True
+                direction_source = "status"
+            elif status == 4:
+                is_self = False
+                direction_source = "status"
+            elif sender_identifier_present:
+                is_self = False
+                direction_source = "real_sender_id"
+            else:
+                is_self = None
+                direction_source = "unknown"
         message_id_source = str(server_id or f"{conversation.selector}:{sequence}:{created}")
         return NormalizedMessage(
             id=_stable_id("message", message_id_source),
@@ -509,4 +626,6 @@ class ChatDataset:
             content=content,
             sequence=int(sequence or 0),
             metadata=metadata,
+            sender_identity_status="self" if is_self else sender_identity_status,
+            direction_source=direction_source,
         )

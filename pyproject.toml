@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wechat-ai-exporter"
-version = "1.0.3"
+version = "1.0.5"
 description = "Local, read-only WeChat chat selection and AI export tooling"
 requires-python = ">=3.11"
 dependencies = ["cryptography>=43"]

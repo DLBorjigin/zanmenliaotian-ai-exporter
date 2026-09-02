@@ -41,15 +41,22 @@ def build(output: Path) -> list[Path]:
         _zip_tree(skill_stage, skill_zip, "wechat-chat-export")
 
         source_stage = staging / "wechat-ai-exporter"
-        for directory in ("src", "skill", "scripts", "tests", "docs", "licenses"):
+        for directory in (
+            ".github", "src", "skill", "scripts", "tests", "docs", "licenses"
+        ):
             shutil.copytree(PROJECT_ROOT / directory, source_stage / directory)
-        for filename in ("pyproject.toml", "README.zh-CN.md", "THIRD_PARTY_NOTICES.md"):
+        for filename in (
+            ".gitignore", "CONTRIBUTING.md", "LICENSE", "PRIVACY.md", "README.md",
+            "README.zh-CN.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md", "pyproject.toml",
+        ):
             shutil.copy2(PROJECT_ROOT / filename, source_stage / filename)
         source_zip = output / "wechat-ai-exporter-source.zip"
         _zip_tree(source_stage, source_zip, "wechat-ai-exporter")
 
     readme = output / "开始使用.md"
     shutil.copy2(PROJECT_ROOT / "README.zh-CN.md", readme)
+    release_notes = output / f"发布说明-v{version}.md"
+    shutil.copy2(PROJECT_ROOT / "docs" / f"release-notes-v{version}.md", release_notes)
     script_names = {
         "install_skill.ps1": "安装工具.ps1",
         "install_skill.cmd": "双击安装.cmd",
@@ -77,7 +84,7 @@ def build(output: Path) -> list[Path]:
         "live_validated_weixin_versions": ["4.1.12.55", "4.1.13.12"],
         "additional_read_only_adapters": ["4.1.10"],
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    primary = [skill_zip, source_zip, readme, release_info, *copied_scripts]
+    primary = [skill_zip, source_zip, readme, release_notes, release_info, *copied_scripts]
     checksum = output / "SHA256SUMS.txt"
     checksum.write_text(
         "".join(

@@ -200,9 +200,21 @@ def build_parser() -> argparse.ArgumentParser:
     export_auto.add_argument("--output-dir", required=True)
     export_auto.add_argument("--limit", type=int, default=100_000)
     export_auto.add_argument("--include-assets", action="store_true")
+    export_auto.add_argument(
+        "--split-asset-bundles", action="store_true", default=True,
+        help="Compatibility alias: media is separated from the records ZIP by default.",
+    )
+    export_auto.add_argument(
+        "--embed-assets", action="store_false", dest="split_asset_bundles",
+        help="Advanced compatibility mode: embed selected media bytes in the records ZIP.",
+    )
     export_auto.add_argument("--account-root")
     export_auto.add_argument("--voice-media-database")
     export_auto.add_argument("--max-asset-bytes", type=int, default=512 * 1024 * 1024)
+    export_auto.add_argument(
+        "--video-asset", choices=("original", "thumbnail", "both"), default="original",
+        help="Select complete video files, video thumbnails, or both.",
+    )
     export_auto.add_argument("--confirm-private-metadata", action="store_true")
     export_auto.add_argument("--confirm-selection", action="store_true")
     export_auto.add_argument("--confirm-read-message-bodies", action="store_true")
@@ -242,9 +254,21 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--output-dir", required=True)
     export.add_argument("--limit", type=int, default=100_000)
     export.add_argument("--include-assets", action="store_true")
+    export.add_argument(
+        "--split-asset-bundles", action="store_true", default=True,
+        help="Compatibility alias: media is separated from the records ZIP by default.",
+    )
+    export.add_argument(
+        "--embed-assets", action="store_false", dest="split_asset_bundles",
+        help="Advanced compatibility mode: embed selected media bytes in the records ZIP.",
+    )
     export.add_argument("--account-root")
     export.add_argument("--media-database", action="append", default=[])
     export.add_argument("--max-asset-bytes", type=int, default=512 * 1024 * 1024)
+    export.add_argument(
+        "--video-asset", choices=("original", "thumbnail", "both"), default="original",
+        help="Select complete video files, video thumbnails, or both.",
+    )
     export.add_argument(
         "--image-key-input", choices=("console", "dialog"),
         help="Securely prompt for a separate 16-character Weixin V2 image key.",
@@ -941,11 +965,13 @@ def main(argv: list[str] | None = None) -> int:
                         image_xor_key=image_xor_key,
                         include_emoticons=MessageKind.EMOTICON in scope.include,
                         allow_remote_media_download=args.allow_remote_media_download,
+                        video_asset=args.video_asset,
                     )
                 export_result = export_chat(
                     dataset, scope, Path(args.output_dir),
                     limit=max(1, min(args.limit, 1_000_000)),
                     media_resolver=media_resolver,
+                    split_asset_bundles=args.split_asset_bundles,
                 )
                 snapshots_payload = {
                     role: str(snapshot.directory) for role, snapshot in snapshots.items()
@@ -956,6 +982,13 @@ def main(argv: list[str] | None = None) -> int:
                 "message_count": export_result.message_count,
                 "counts_by_kind": export_result.counts_by_kind,
                 "sha256": export_result.sha256,
+                "asset_archives": {
+                    category: {
+                        "path": str(path),
+                        "sha256": export_result.asset_archive_sha256[category],
+                    }
+                    for category, path in export_result.asset_archives.items()
+                },
                 "encrypted_snapshots": snapshots_payload,
                 "process_memory_access": "read_only",
                 "process_memory_scan_count": len(sources),
@@ -966,6 +999,7 @@ def main(argv: list[str] | None = None) -> int:
                 "image_key_discovery_used": bool(
                     args.include_assets and args.confirm_image_key_discovery
                 ),
+                "video_asset": args.video_asset,
             }
             if args.as_json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1084,11 +1118,13 @@ def main(argv: list[str] | None = None) -> int:
                     image_xor_key=image_xor_key,
                     include_emoticons=MessageKind.EMOTICON in scope.include,
                     allow_remote_media_download=args.allow_remote_media_download,
+                    video_asset=args.video_asset,
                 )
             result = export_chat(
                 _dataset_from_args(args), scope, Path(args.output_dir),
                 limit=max(1, min(args.limit, 1_000_000)),
                 media_resolver=media_resolver,
+                split_asset_bundles=args.split_asset_bundles,
             )
             payload = {
                 "status": "export_ready",
@@ -1096,7 +1132,15 @@ def main(argv: list[str] | None = None) -> int:
                 "message_count": result.message_count,
                 "counts_by_kind": result.counts_by_kind,
                 "sha256": result.sha256,
+                "asset_archives": {
+                    category: {
+                        "path": str(path),
+                        "sha256": result.asset_archive_sha256[category],
+                    }
+                    for category, path in result.asset_archives.items()
+                },
                 "message_content_printed": False,
+                "video_asset": args.video_asset,
             }
             if args.as_json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))

@@ -27,6 +27,77 @@ def create_contact_db(path: Path) -> None:
 
 
 class ChatDataTests(unittest.TestCase):
+    def test_v3_group_sender_prefix_recovers_identity_when_direction_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            message_db = root / "MSG.db"
+            contact_db = root / "contact.db"
+            create_contact_db(contact_db)
+            connection = sqlite3.connect(message_db)
+            connection.execute(
+                "CREATE TABLE MSG (Sequence INTEGER, MsgSvrID INTEGER, Type INTEGER, "
+                "SubType INTEGER, IsSender INTEGER, CreateTime INTEGER, StrTalker TEXT, "
+                "StrContent TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO MSG VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, 301, 1, 0, None, 1_700_000_000, "room@chatroom",
+                 "wxid_sender:\nlegacy hello"),
+            )
+            connection.commit()
+            connection.close()
+
+            dataset = ChatDataset([message_db], "wechat-3", contact_database=contact_db)
+            conversation = dataset.conversations()[0]
+            message = next(dataset.iter_messages(ExportScope(
+                conversation.id, include=frozenset({MessageKind.TEXT})
+            )))
+            self.assertEqual(message.sender_name, "Group Sender")
+            self.assertFalse(message.is_self)
+            self.assertEqual(message.content, "legacy hello")
+            self.assertEqual(message.sender_identity_status, "contact")
+            self.assertEqual(message.direction_source, "message_sender_prefix")
+
+    def test_v4_real_sender_recovers_direction_when_status_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            message_db = root / "message.db"
+            session_db = root / "session.db"
+            contact_db = root / "contact.db"
+            create_contact_db(contact_db)
+            table = "Msg_" + hashlib.md5(b"room@chatroom").hexdigest()
+            connection = sqlite3.connect(message_db)
+            connection.execute("CREATE TABLE Name2Id (rowid INTEGER PRIMARY KEY, user_name TEXT)")
+            connection.execute("INSERT INTO Name2Id VALUES (1, 'wxid_sender')")
+            connection.execute(
+                f'CREATE TABLE "{table}" (local_id INTEGER, server_id INTEGER, '
+                "local_type INTEGER, sort_seq INTEGER, real_sender_id INTEGER, "
+                "create_time INTEGER, status INTEGER, message_content TEXT)"
+            )
+            connection.execute(
+                f'INSERT INTO "{table}" VALUES (1, 401, 1, 1, 1, 1700000000, 0, "hello")'
+            )
+            connection.commit()
+            connection.close()
+            connection = sqlite3.connect(session_db)
+            connection.execute("CREATE TABLE SessionTable (username TEXT)")
+            connection.execute("INSERT INTO SessionTable VALUES ('room@chatroom')")
+            connection.commit()
+            connection.close()
+
+            dataset = ChatDataset(
+                [message_db], "weixin-4", session_database=session_db,
+                contact_database=contact_db,
+            )
+            conversation = dataset.conversations()[0]
+            message = next(dataset.iter_messages(ExportScope(
+                conversation.id, include=frozenset({MessageKind.TEXT})
+            )))
+            self.assertEqual(message.sender_name, "Group Sender")
+            self.assertFalse(message.is_self)
+            self.assertEqual(message.sender_identity_status, "contact")
+            self.assertEqual(message.direction_source, "real_sender_id")
+
     def test_v3_catalog_time_and_type_filters(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -168,6 +239,45 @@ class ChatDataTests(unittest.TestCase):
             self.assertEqual(len(messages), 1)
             self.assertEqual(messages[0].kind, MessageKind.FILE)
             self.assertIn("report.pdf", messages[0].content)
+
+    def test_v4_same_conversation_is_merged_across_message_databases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            selector = "room@chatroom"
+            table = "Msg_" + hashlib.md5(selector.encode("utf-8")).hexdigest()
+            message_databases = []
+            rows_by_database = (
+                [(1, 101, 1, 1, 1700000001, 4, "first"),
+                 (2, 102, 1, 2, 1700000002, 4, "duplicate")],
+                [(20, 102, 1, 2, 1700000002, 4, "duplicate"),
+                 (3, 103, 1, 3, 1700000003, 4, "third")],
+            )
+            for index, rows in enumerate(rows_by_database):
+                database = root / f"message_{index}.db"
+                connection = sqlite3.connect(database)
+                connection.execute(
+                    f'CREATE TABLE "{table}" (local_id INTEGER, server_id INTEGER, '
+                    "local_type INTEGER, sort_seq INTEGER, create_time INTEGER, status INTEGER, "
+                    "message_content TEXT)"
+                )
+                connection.executemany(f'INSERT INTO "{table}" VALUES (?, ?, ?, ?, ?, ?, ?)', rows)
+                connection.commit()
+                connection.close()
+                message_databases.append(database)
+            session = root / "session.db"
+            connection = sqlite3.connect(session)
+            connection.execute("CREATE TABLE SessionTable (username TEXT, last_timestamp INTEGER)")
+            connection.execute("INSERT INTO SessionTable VALUES (?, ?)", (selector, 1700000003))
+            connection.commit()
+            connection.close()
+
+            dataset = ChatDataset(message_databases, "weixin-4", session_database=session)
+            conversation = dataset.conversations()[0]
+            messages = list(dataset.iter_messages(ExportScope(
+                conversation.id, include=frozenset({MessageKind.TEXT})
+            )))
+            self.assertEqual([item.content for item in messages], ["first", "duplicate", "third"])
+            self.assertEqual(dataset.preview(ExportScope(conversation.id))["message_database_shards"], 2)
 
 
 if __name__ == "__main__":
