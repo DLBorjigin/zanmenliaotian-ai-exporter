@@ -292,6 +292,16 @@ class MediaTests(unittest.TestCase):
             self.assertEqual(result.status, "packaged")
             self.assertEqual((root / "out" / result.relative_path).read_bytes(), b"PDF-test")
 
+    def test_missing_packed_file_preserves_filename_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = MediaResolver(root).resolve(
+                message(MessageKind.FILE, packed_info=b"\x12\x08B108.pdf"),
+                root / "out" / "assets",
+            )[0]
+            self.assertEqual(result.status, "not_found")
+            self.assertEqual(result.original_name, "B108.pdf")
+
     def test_voice_blob_is_normalized_to_silk(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

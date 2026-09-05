@@ -355,7 +355,8 @@ class MediaResolver:
         candidates = self._candidates(message, index)
         if not candidates:
             status = "not_found" if index.last_query_complete else "index_incomplete"
-            return [self._status(message, status)]
+            original_name = self._missing_filename_hint(message)
+            return [self._status(message, status, original_name)]
         top_score = candidates[0][0]
         top = sorted({path for score, path in candidates if score == top_score})
         if len(top) > 1 and self._all_files_identical(top):
@@ -486,6 +487,29 @@ class MediaResolver:
         elif raw is not None:
             pieces.append(str(raw))
         return "\n".join(pieces)
+
+    def _missing_filename_hint(self, message: NormalizedMessage) -> str | None:
+        text = self._metadata_text(message)
+        names = set()
+        for field in ("title", "filename", "file_name", "path"):
+            for match in re.findall(
+                rf"(?is)<{field}>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</{field}>", text
+            ):
+                if match.strip():
+                    names.add(Path(match.strip().replace("\\", "/")).name)
+        raw = message.metadata.get("packed_info")
+        if message.kind == MessageKind.FILE and isinstance(raw, bytes):
+            text = raw.decode("utf-8", "ignore")
+            for match in re.findall(
+                r"[^\\/\x00\r\n<>|?*]{1,200}\.[A-Za-z0-9]{1,10}", text
+            ):
+                candidate = re.sub(r"^[\x00-\x1f]+", "", match.strip())
+                if len(candidate) > 1 and ord(candidate[0]) == len(candidate[1:].encode("utf-8")):
+                    candidate = candidate[1:]
+                candidate = Path(candidate.replace("\\", "/")).name.strip()
+                if candidate:
+                    names.add(candidate)
+        return sorted(names)[0] if len(names) == 1 else None
 
     def _candidates(self, message: NormalizedMessage,
                     index: MediaIndex) -> list[tuple[int, Path]]:

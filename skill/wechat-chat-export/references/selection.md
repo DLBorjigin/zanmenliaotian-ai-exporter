@@ -10,6 +10,10 @@ List conversations before reading message bodies. The runtime maps WeChat 3.x `M
   (`23:07:59`) unless they explicitly request an exact instant or half-open range.
 - Normalize seconds, milliseconds, and microseconds to Unix seconds. Preserve chronological ordering using the native sequence field as a tie-breaker.
 - Preview counts by normalized type before selecting message bodies. Type 49 is only a coarse `link` count during preview because distinguishing a file requires inspecting XML content; report it as ambiguous.
+- Weixin 4.1.13.12 may pack an application-message subtype into the high 32 bits
+  of `local_type`, leaving base type 49 in the low 32 bits. Split that value
+  before classification; packed subtype 6 is a file even when message XML is
+  absent. Preserve the original packed type and expose the decoded subtype.
 - Exclude emoticons by default unless the user asks for them. Apply the approved kind filter again after normalization.
 - Interpret media words as exact selectors. `图片` selects normalized kind
   `image`, `表情` selects `emoticon`, and either video request selects `video`.

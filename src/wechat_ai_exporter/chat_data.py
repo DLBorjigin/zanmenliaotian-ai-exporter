@@ -96,18 +96,28 @@ def parse_time_bound(value: str | None) -> int | None:
     return int(parsed.timestamp())
 
 
+def split_v4_local_type(type_code: int) -> tuple[int, int | None]:
+    """Split Weixin 4's packed app-message type into base and app subtype."""
+    if type_code > 0xFFFFFFFF:
+        return type_code & 0xFFFFFFFF, type_code >> 32
+    return type_code, None
+
+
 def message_kind(type_code: int, content: str = "", inspect_content: bool = True) -> MessageKind:
-    if type_code == 1:
+    base_type, packed_subtype = split_v4_local_type(type_code)
+    if base_type == 1:
         return MessageKind.TEXT
-    if type_code == 3:
+    if base_type == 3:
         return MessageKind.IMAGE
-    if type_code == 34:
+    if base_type == 34:
         return MessageKind.AUDIO
-    if type_code in {43, 62}:
+    if base_type in {43, 62}:
         return MessageKind.VIDEO
-    if type_code == 47:
+    if base_type == 47:
         return MessageKind.EMOTICON
-    if type_code == 49:
+    if base_type == 49:
+        if packed_subtype == 6:
+            return MessageKind.FILE
         if inspect_content:
             try:
                 root = ET.fromstring(content)
@@ -117,7 +127,7 @@ def message_kind(type_code: int, content: str = "", inspect_content: bool = True
             except (ET.ParseError, TypeError):
                 pass
         return MessageKind.LINK
-    if type_code >= 10_000:
+    if base_type >= 10_000:
         return MessageKind.SYSTEM
     return MessageKind.UNKNOWN
 
@@ -362,7 +372,8 @@ class ChatDataset:
                 ).fetchall()
                 for raw_type, count in rows:
                     kind = message_kind(int(raw_type or 0), inspect_content=False)
-                    if int(raw_type or 0) == 49:
+                    base_type, _ = split_v4_local_type(int(raw_type or 0))
+                    if base_type == 49:
                         ambiguous += int(count)
                     counts[kind.value] += int(count)
             finally:
@@ -614,6 +625,7 @@ class ChatDataset:
                 is_self = None
                 direction_source = "unknown"
         message_id_source = str(server_id or f"{conversation.selector}:{sequence}:{created}")
+        _, packed_subtype = split_v4_local_type(type_code)
         return NormalizedMessage(
             id=_stable_id("message", message_id_source),
             conversation_id=conversation.id,
@@ -622,7 +634,7 @@ class ChatDataset:
             is_self=is_self,
             kind=kind,
             type_code=type_code,
-            subtype_code=int(subtype) if subtype is not None else None,
+            subtype_code=int(subtype) if subtype is not None else packed_subtype,
             content=content,
             sequence=int(sequence or 0),
             metadata=metadata,

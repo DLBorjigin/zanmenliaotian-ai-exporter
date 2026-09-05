@@ -66,7 +66,8 @@ def _markdown_content(message: NormalizedMessage, assets: list[AssetRecord]) -> 
     if message.kind in {MessageKind.TEXT, MessageKind.SYSTEM}:
         return message.content
     if message.kind == MessageKind.FILE:
-        title = _xml_text(message.content, "title") or "Unnamed file"
+        asset_name = next((item.original_name for item in assets if item.original_name), None)
+        title = _xml_text(message.content, "title") or asset_name or "Unnamed file"
         missing = assets[0].status if assets else "not packaged"
         return f"[File] {title} ({missing})"
     if message.kind == MessageKind.LINK:
