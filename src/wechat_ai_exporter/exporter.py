@@ -54,6 +54,22 @@ def _xml_text(content: str, field: str) -> str:
 
 
 def _markdown_content(message: NormalizedMessage, assets: list[AssetRecord]) -> str:
+    if message.kind == MessageKind.AUDIO:
+        transcribed = next((item for item in assets if item.transcript), None)
+        packaged = [item for item in assets if item.relative_path]
+        lines = []
+        if transcribed:
+            lines.append(f"[机器语音转写] {transcribed.transcript}")
+        elif assets and assets[0].transcription_status:
+            lines.append(
+                f"[Voice transcription unavailable: {assets[0].transcription_status}]"
+            )
+        lines.extend(
+            f"[{item.original_name or 'Voice message'}]({item.relative_path})"
+            for item in packaged
+        )
+        if lines:
+            return "\n".join(lines)
     packaged = [item for item in assets if item.relative_path]
     if packaged:
         links = "\n".join(
@@ -87,7 +103,7 @@ def _markdown_content(message: NormalizedMessage, assets: list[AssetRecord]) -> 
 
 def _message_dict(message: NormalizedMessage, assets: list[AssetRecord]) -> dict[str, object]:
     direction = "self" if message.is_self is True else "other" if message.is_self is False else "unknown"
-    return {
+    payload = {
         "id": message.id,
         "conversation_id": message.conversation_id,
         "timestamp": message.timestamp,
@@ -107,6 +123,17 @@ def _message_dict(message: NormalizedMessage, assets: list[AssetRecord]) -> dict
         "content": message.content,
         "assets": [item.to_dict() for item in assets],
     }
+    transcribed = next((item for item in assets if item.transcription_status), None)
+    if transcribed:
+        payload["voice_transcription"] = {
+            "status": transcribed.transcription_status,
+            "text": transcribed.transcript,
+            "engine": transcribed.transcription_engine,
+            "model": transcribed.transcription_model,
+            "language": transcribed.transcription_language,
+            "machine_generated": True,
+        }
+    return payload
 
 
 def export_chat(dataset: ChatDataset, scope: ExportScope, output_directory: Path,
@@ -213,6 +240,16 @@ def export_chat(dataset: ChatDataset, scope: ExportScope, output_directory: Path
             "message_count": message_count,
             "counts_by_kind": dict(sorted(counts.items())),
             "assets": [item.to_dict() for item in asset_records],
+            "voice_transcription": {
+                "requested": bool(
+                    media_resolver and media_resolver.voice_transcriber is not None
+                ),
+                "machine_generated": True,
+                "counts_by_status": dict(sorted(Counter(
+                    item.transcription_status for item in asset_records
+                    if item.transcription_status
+                ).items())),
+            },
             "asset_delivery": asset_delivery,
             "privacy": {
                 "contains_database_key": False,

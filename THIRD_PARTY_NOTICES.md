@@ -18,3 +18,15 @@ general key-pattern scan with an exact-version, exact-registration-node path and
 mandatory HMAC validation against the user-selected database.
 
 A copy of that MIT License is included in `licenses/MIT-weflow-cli.txt`.
+
+Offline voice transcription uses [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+and the multilingual OpenAI Whisper base model. Both are distributed under the
+MIT License; copies are included in `licenses/MIT-whisper.cpp.txt` and
+`licenses/MIT-openai-whisper.txt`.
+
+WeChat SILK decoding is compiled from the pinned
+[`kn007/silk-v3-decoder`](https://github.com/kn007/silk-v3-decoder) source.
+The wrapper is MIT licensed and the included SILK SDK carries its own
+BSD-style terms. Copies are included in `licenses/MIT-silk-v3-decoder.txt` and
+`licenses/BSD-SILK-SDK.txt`. Source pins and download checksums are recorded in
+`vendor/voice-runtime.json`.

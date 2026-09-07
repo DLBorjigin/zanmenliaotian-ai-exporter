@@ -34,7 +34,15 @@ size and SHA-256; non-identical ties remain `ambiguous_match`.
   image found in a video directory is `packaged_thumbnail_only`, never a complete video.
 - Legacy single-byte-XOR `.dat` images are detected from image magic and decoded locally.
 - V1 `.dat` images remain `image_v1_key_required`. V2 images can use a separately supplied or discovered AES/XOR key; otherwise they remain `image_v2_key_required`. Never guess a key or package output unless its padding and image signature validate.
-- Weixin 4.x voice data may reside in decrypted `media_*.db` `VoiceInfo.voice_data`. Match using message local/server IDs, remove the optional one-byte WeChat SILK prefix, and package `.silk` as `packaged_requires_conversion` until an approved decoder is bundled.
+- Weixin 4.x voice data may reside in decrypted `media_*.db` `VoiceInfo.voice_data`.
+  Match using message local/server IDs, remove the optional one-byte WeChat SILK
+  prefix, and always preserve the normalized `.silk`. When the user explicitly
+  requests transcription and confirms local voice-content processing, decode to
+  temporary 16 kHz mono PCM/WAV with the bundled decoder and run the bundled
+  multilingual whisper.cpp model offline. Delete temporary PCM/WAV/output files,
+  place the machine-generated text on the original message, and preserve a clear
+  per-message failure status without aborting the rest of the export. Never use a
+  cloud speech service as an implicit fallback.
 - `wxgf` animation containers may be packaged with the custom `application/x-wechat-wxgf` media type; do not claim they are standard GIF/WebP. When a verified V2 thumbnail or high-resolution companion decodes to a standard image, add it as `packaged_preview`.
 - Unknown local emoticon formats are not copied as viewable images. A selected
   emoticon may use its message-provided CDN URL only after separate network

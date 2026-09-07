@@ -716,6 +716,24 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(main(base + ["--confirm-read-message-bodies", "--include-assets"]), 4)
         probe.assert_not_called()
 
+    def test_voice_transcription_requires_attachment_and_content_confirmations(self) -> None:
+        base = [
+            "export-auto-key", "--message-database", "message.db",
+            "--session-database", "session.db", "--contact-database", "contact.db",
+            "--snapshot-dir", "snapshots", "--work-dir", "work",
+            "--conversation-id", "conversation-test", "--output-dir", "out",
+            "--confirm-read-process-memory", "--confirm-private-metadata",
+            "--confirm-selection", "--confirm-read-message-bodies",
+            "--transcribe-audio",
+        ]
+        with mock.patch("wechat_ai_exporter.cli.probe_database_key") as probe:
+            self.assertEqual(main(base), 3)
+            self.assertEqual(main(base + [
+                "--include-assets", "--confirm-copy-attachments",
+                "--account-root", ".",
+            ]), 4)
+        probe.assert_not_called()
+
     def test_auto_export_scans_once_per_database_and_cleans_plaintext(self) -> None:
         keys = [bytearray([value]) * 32 for value in (4, 5, 6)]
         probes = [

@@ -11,25 +11,38 @@ import zipfile
 
 
 class ReleaseTests(unittest.TestCase):
+    @staticmethod
+    def _fake_voice_runtime(root: Path) -> Path:
+        runtime = root / "voice-runtime"
+        for relative in (
+            "silk/silk-decoder.exe", "whisper/whisper-cli.exe", "models/ggml-base.bin"
+        ):
+            path = runtime / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"test-runtime")
+        return runtime
+
     def test_publish_kit_matches_release_embedded_source(self) -> None:
         project = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp:
             output_parent = Path(temp) / "publish"
             output_parent.mkdir()
+            voice_runtime = self._fake_voice_runtime(Path(temp))
             built = subprocess.run(
                 [sys.executable, str(project / "scripts" / "build_publish_kit.py"),
-                 "--output-parent", str(output_parent)],
+                 "--output-parent", str(output_parent),
+                 "--voice-runtime-dir", str(voice_runtime)],
                 cwd=project, capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(built.returncode, 0, built.stderr)
-            kit = output_parent / "GitHub上传材料-v1.0.6"
+            kit = output_parent / "GitHub上传材料-v1.0.7"
             repository = kit / "01-仓库源码"
-            bundle = kit / "02-Release附件" / "微信聊天导出工具-v1.0.6-Windows.zip"
+            bundle = kit / "02-Release附件" / "微信聊天导出工具-v1.0.7-Windows.zip"
             self.assertTrue((kit / "上传指南.md").is_file())
             self.assertTrue(bundle.is_file())
             self.assertFalse(any(repository.glob("*Windows.zip")))
             manifest = json.loads((kit / "材料清单.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["version"], "1.0.6")
+            self.assertEqual(manifest["version"], "1.0.7")
 
             with zipfile.ZipFile(bundle) as outer:
                 source_name = next(
@@ -57,9 +70,11 @@ class ReleaseTests(unittest.TestCase):
         project = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "release"
+            voice_runtime = self._fake_voice_runtime(Path(temp))
             built = subprocess.run(
                 [sys.executable, str(project / "scripts" / "build_release.py"),
-                 "--output", str(output)],
+                 "--output", str(output),
+                 "--voice-runtime-dir", str(voice_runtime)],
                 cwd=project, capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(built.returncode, 0, built.stderr)
@@ -72,14 +87,17 @@ class ReleaseTests(unittest.TestCase):
             self.assertTrue((output / "双击卸载.cmd").is_file())
             self.assertTrue((output / "双击恢复上一版本.cmd").is_file())
             self.assertTrue((output / "版本信息.json").is_file())
-            self.assertTrue((output / "发布说明-v1.0.6.md").is_file())
-            self.assertTrue((output / "微信聊天导出工具-v1.0.6-Windows.zip").is_file())
+            self.assertTrue((output / "发布说明-v1.0.7.md").is_file())
+            self.assertTrue((output / "微信聊天导出工具-v1.0.7-Windows.zip").is_file())
             self.assertTrue((output / "发行包SHA256.txt").is_file())
             with zipfile.ZipFile(skill_zip) as archive:
                 names = archive.namelist()
                 self.assertIn("wechat-chat-export/SKILL.md", names)
                 self.assertIn(
                     "wechat-chat-export/runtime/src/wechat_ai_exporter/cli.py", names
+                )
+                self.assertIn(
+                    "wechat-chat-export/runtime/voice-runtime/models/ggml-base.bin", names
                 )
                 self.assertFalse(any("VisualPrefetch" in name for name in names))
                 self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") for name in names))
@@ -93,7 +111,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             payload = json.loads(run.stdout)
             self.assertEqual(payload["status"], "runtime_ready")
-            self.assertEqual(payload["version"], "1.0.6")
+            self.assertEqual(payload["version"], "1.0.7")
+            self.assertTrue(payload["offline_voice_transcription"]["available"])
             info = json.loads((output / "版本信息.json").read_text(encoding="utf-8"))
             self.assertIn("4.1.13.12", info["live_validated_weixin_versions"])
             self.assertFalse(payload["network_required"])
@@ -114,9 +133,11 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             output = root / "release"
+            voice_runtime = self._fake_voice_runtime(root)
             built = subprocess.run(
                 [sys.executable, str(project / "scripts" / "build_release.py"),
-                 "--output", str(output)],
+                 "--output", str(output),
+                 "--voice-runtime-dir", str(voice_runtime)],
                 cwd=project, capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(built.returncode, 0, built.stderr)

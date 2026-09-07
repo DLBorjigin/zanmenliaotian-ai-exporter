@@ -319,12 +319,41 @@ class MediaTests(unittest.TestCase):
             result = MediaResolver(media_databases=[database]).resolve(
                 message(MessageKind.AUDIO), root / "out" / "assets"
             )[0]
-            self.assertEqual(result.status, "packaged_requires_conversion")
+            self.assertEqual(result.status, "packaged")
             self.assertEqual(result.media_type, "audio/silk")
             self.assertEqual(
                 (root / "out" / result.relative_path).read_bytes(),
                 b"#!SILK_V3synthetic-audio",
             )
+
+    def test_voice_transcription_is_attached_to_asset_record(self) -> None:
+        from wechat_ai_exporter.transcription import TranscriptionResult
+
+        class FakeTranscriber:
+            language = "zh"
+
+            def transcribe(self, _path):
+                return TranscriptionResult(status="transcribed", text="这是一条测试语音。")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            database = root / "media_0.db"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE VoiceInfo (local_id INTEGER, svr_id INTEGER, voice_data BLOB)"
+            )
+            connection.execute(
+                "INSERT INTO VoiceInfo VALUES (10, 20, ?)",
+                (b"\x02#!SILK_V3synthetic-audio",),
+            )
+            connection.commit()
+            connection.close()
+            result = MediaResolver(
+                media_databases=[database], voice_transcriber=FakeTranscriber()
+            ).resolve(message(MessageKind.AUDIO), root / "out" / "assets")[0]
+            self.assertEqual(result.transcription_status, "transcribed")
+            self.assertEqual(result.transcript, "这是一条测试语音。")
+            self.assertEqual(result.transcription_engine, "whisper.cpp")
 
     def test_ambiguous_file_match_is_not_copied(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

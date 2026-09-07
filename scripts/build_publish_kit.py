@@ -14,7 +14,7 @@ from build_release import build as build_release
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_DIRECTORIES = (
-    ".github", "docs", "licenses", "scripts", "skill", "src", "tests",
+    ".github", "docs", "licenses", "scripts", "skill", "src", "tests", "vendor",
 )
 REPOSITORY_FILES = (
     ".gitignore", "CONTRIBUTING.md", "LICENSE", "PRIVACY.md", "README.md",
@@ -55,7 +55,7 @@ def _zip_tree(root: Path, destination: Path) -> None:
                 archive.write(path, (Path(root.name) / path.relative_to(root)).as_posix())
 
 
-def build(output_parent: Path) -> tuple[Path, Path]:
+def build(output_parent: Path, voice_runtime: Path | None = None) -> tuple[Path, Path]:
     metadata = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     version = metadata["project"]["version"]
     kit = output_parent.resolve() / f"GitHub上传材料-v{version}"
@@ -67,7 +67,7 @@ def build(output_parent: Path) -> tuple[Path, Path]:
     release_assets.mkdir(parents=True)
 
     with tempfile.TemporaryDirectory(prefix="wechat-publish-kit-") as temp:
-        built = build_release(Path(temp))
+        built = build_release(Path(temp), voice_runtime)
         bundle = next(path for path in built if path.name == f"微信聊天导出工具-v{version}-Windows.zip")
         checksum = next(path for path in built if path.name == "发行包SHA256.txt")
         shutil.copy2(bundle, release_assets / bundle.name)
@@ -110,6 +110,7 @@ def build(output_parent: Path) -> tuple[Path, Path]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-parent", required=True, type=Path)
+    parser.add_argument("--voice-runtime-dir", type=Path)
     args = parser.parse_args()
-    for artifact in build(args.output_parent):
+    for artifact in build(args.output_parent, args.voice_runtime_dir):
         print(artifact)

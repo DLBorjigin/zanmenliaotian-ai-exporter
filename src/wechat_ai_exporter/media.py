@@ -15,6 +15,7 @@ import urllib.request
 
 from .chat_data import _columns, _connect, _quote, _tables
 from .models import MessageKind, NormalizedMessage
+from .transcription import LocalVoiceTranscriber
 
 
 V1_MAGIC = b"\x07\x08V1\x08\x07"
@@ -49,6 +50,11 @@ class AssetRecord:
     size: int | None = None
     sha256: str | None = None
     original_name: str | None = None
+    transcript: str | None = None
+    transcription_status: str | None = None
+    transcription_engine: str | None = None
+    transcription_model: str | None = None
+    transcription_language: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -315,7 +321,8 @@ class MediaResolver:
                  image_xor_key: int | None = None,
                  include_emoticons: bool = False,
                  allow_remote_media_download: bool = False,
-                 video_asset: str = "original") -> None:
+                 video_asset: str = "original",
+                 voice_transcriber: LocalVoiceTranscriber | None = None) -> None:
         self.account_root = Path(account_root) if account_root else None
         self.media_databases = [Path(item) for item in (media_databases or [])]
         self.max_asset_bytes = max_asset_bytes
@@ -323,6 +330,7 @@ class MediaResolver:
         self.image_xor_key = image_xor_key
         self.include_emoticons = include_emoticons
         self.allow_remote_media_download = allow_remote_media_download
+        self.voice_transcriber = voice_transcriber
         if video_asset not in VIDEO_ASSET_CHOICES:
             raise ValueError(f"invalid video asset mode: {video_asset}")
         self.video_asset = video_asset
@@ -866,7 +874,7 @@ class MediaResolver:
         data = next(iter(unique.values()))
         if data.startswith(b"\x02#!SILK_V3"):
             data = data[1:]
-        status = "packaged_requires_conversion"
+        status = "packaged"
         extension = ".silk" if data.startswith(b"#!SILK_V3") else ".bin"
         media_type = "audio/silk" if extension == ".silk" else "application/octet-stream"
         asset_dir = _asset_dir(assets_root, message)
@@ -874,9 +882,23 @@ class MediaResolver:
         target = asset_dir / f"voice{extension}"
         target.write_bytes(data)
         relative = target.relative_to(assets_root.parent).as_posix()
+        transcription = None
+        if self.voice_transcriber is not None and extension == ".silk":
+            transcription = self.voice_transcriber.transcribe(target)
+        elif self.voice_transcriber is not None:
+            from .transcription import TranscriptionResult
+            transcription = TranscriptionResult(
+                status="unsupported_voice_format",
+                language=self.voice_transcriber.language,
+            )
         return AssetRecord(
             id=f"asset-{_hash_bytes(data)[:12]}", message_id=message.id,
             kind=message.kind.value, status=status, relative_path=relative,
             media_type=media_type, size=len(data), sha256=_hash_bytes(data),
             original_name=None,
+            transcript=transcription.text if transcription else None,
+            transcription_status=transcription.status if transcription else None,
+            transcription_engine=transcription.engine if transcription else None,
+            transcription_model=transcription.model if transcription else None,
+            transcription_language=transcription.language if transcription else None,
         )

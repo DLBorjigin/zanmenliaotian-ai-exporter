@@ -30,6 +30,11 @@ nontechnical user to install Python or packages manually.
    only; `表情` means emoticon messages only; `视频` means playable original
    video only; and `视频封面` means the video's image thumbnail only. Never add
    neighboring media kinds merely because their files share an image extension.
+   A request for `语音转文字`, `语音转写`, or equivalent means include audio,
+   copy only the selected voice blobs after attachment confirmation, and enable
+   the bundled local transcriber after separate confirmation to process voice
+   content. Default to language `zh`; use `auto` only for clearly mixed-language
+   audio or when the user requests automatic language detection.
 6. Export only the approved scope. Attachments and image-key discovery require
    separate confirmation. Remote media completion requires another explicit
    network confirmation and stays disabled otherwise. Preserve the original
@@ -42,6 +47,12 @@ nontechnical user to install Python or packages manually.
 8. Report missing, expired, or unsupported media explicitly rather than silently
    omitting it. Never report `not_found` when a targeted media directory could not
    be read completely; use `index_incomplete` and one safe next action instead.
+9. Voice transcription must remain offline. Use the release-bundled SILK decoder,
+   whisper.cpp executable, and multilingual model; never send voice bytes or
+   generated text to an online transcription API. Preserve the original `.silk`
+   beside the machine-generated transcript for verification. Clearly label the
+   result as machine generated, warn that it may contain errors, and preserve
+   per-message failure statuses without aborting the rest of the export.
 
 Read [references/security-modes.md](references/security-modes.md) before any key or process operation. Read [references/export-contract.md](references/export-contract.md) when producing an export.
 Read [references/discovery.md](references/discovery.md) when discovery returns multiple, stale, or no account candidates.

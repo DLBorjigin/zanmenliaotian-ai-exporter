@@ -25,9 +25,11 @@ from .models import AccessMode, ExportScope, MessageKind
 from .security import AUTHORIZATION_MATRIX
 from .snapshot import SnapshotError, create_verified_snapshot
 from .schema_inspector import SchemaInspectionError, inspect_schema
+from .transcription import LocalVoiceTranscriber, VoiceRuntimeError
 
 
 def _doctor_payload() -> dict[str, object]:
+    voice_runtime = LocalVoiceTranscriber()
     return {
         "product": "wechat-ai-exporter",
         "version": __version__,
@@ -35,6 +37,13 @@ def _doctor_payload() -> dict[str, object]:
         "platform_release": platform.release(),
         "machine": platform.machine(),
         "python": platform.python_version(),
+        "offline_voice_transcription": {
+            "available": not voice_runtime.missing_components(),
+            "engine": "whisper.cpp",
+            "model": "ggml-base multilingual",
+            "network_required": False,
+            "missing_components": voice_runtime.missing_components(),
+        },
         "available_modes": [mode.value for mode in AccessMode],
         "authorization": {
             mode.value: {
@@ -210,6 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_auto.add_argument("--account-root")
     export_auto.add_argument("--voice-media-database")
+    _add_transcription_arguments(export_auto)
     export_auto.add_argument("--max-asset-bytes", type=int, default=512 * 1024 * 1024)
     export_auto.add_argument(
         "--video-asset", choices=("original", "thumbnail", "both"), default="original",
@@ -264,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--account-root")
     export.add_argument("--media-database", action="append", default=[])
+    _add_transcription_arguments(export)
     export.add_argument("--max-asset-bytes", type=int, default=512 * 1024 * 1024)
     export.add_argument(
         "--video-asset", choices=("original", "thumbnail", "both"), default="original",
@@ -308,6 +319,41 @@ def _add_auto_dataset_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--time-budget", type=float, default=20.0, metavar="SECONDS")
     parser.add_argument("--confirm-read-process-memory", action="store_true")
+
+
+def _add_transcription_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--transcribe-audio", action="store_true",
+        help="Decode selected voice messages and transcribe them locally with bundled whisper.cpp.",
+    )
+    parser.add_argument(
+        "--confirm-transcribe-audio", action="store_true",
+        help="Confirm local machine processing of the selected voice-message content.",
+    )
+    parser.add_argument(
+        "--transcription-language", default="zh",
+        help="Whisper language code; defaults to zh. Use auto for mixed-language detection.",
+    )
+    parser.add_argument(
+        "--voice-runtime-dir",
+        help="Advanced override for the bundled offline voice runtime directory.",
+    )
+    parser.add_argument(
+        "--transcription-timeout", type=float, default=300.0, metavar="SECONDS",
+        help="Maximum local processing time per voice message (5-1800 seconds).",
+    )
+
+
+def _voice_transcriber_from_args(args: argparse.Namespace) -> LocalVoiceTranscriber | None:
+    if not args.transcribe_audio:
+        return None
+    transcriber = LocalVoiceTranscriber(
+        Path(args.voice_runtime_dir) if args.voice_runtime_dir else None,
+        language=args.transcription_language,
+        timeout_seconds=args.transcription_timeout,
+    )
+    transcriber.validate()
+    return transcriber
 
 
 def _auto_sources_from_args(args: argparse.Namespace, include_media: bool = False) -> dict[str, Path]:
@@ -916,6 +962,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.include_assets and not args.confirm_copy_attachments:
             print("Separate confirmation is required to copy selected attachments.", file=sys.stderr)
             return 4
+        if args.transcribe_audio and not args.include_assets:
+            print("Voice transcription requires attachment export mode.", file=sys.stderr)
+            return 3
+        if args.transcribe_audio and not args.confirm_transcribe_audio:
+            print("Separate confirmation is required to transcribe selected voice content locally.", file=sys.stderr)
+            return 4
         if args.allow_remote_media_download and not args.confirm_remote_media_download:
             print("Separate confirmation is required for selected-media network downloads.", file=sys.stderr)
             return 4
@@ -957,6 +1009,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 media_resolver = None
                 if args.include_assets:
+                    voice_transcriber = _voice_transcriber_from_args(args)
                     media_resolver = MediaResolver(
                         Path(args.account_root) if args.account_root else None,
                         [plaintext["media"]] if "media" in plaintext else [],
@@ -966,6 +1019,7 @@ def main(argv: list[str] | None = None) -> int:
                         include_emoticons=MessageKind.EMOTICON in scope.include,
                         allow_remote_media_download=args.allow_remote_media_download,
                         video_asset=args.video_asset,
+                        voice_transcriber=voice_transcriber,
                     )
                 export_result = export_chat(
                     dataset, scope, Path(args.output_dir),
@@ -1000,6 +1054,8 @@ def main(argv: list[str] | None = None) -> int:
                     args.include_assets and args.confirm_image_key_discovery
                 ),
                 "video_asset": args.video_asset,
+                "voice_transcription_requested": bool(args.transcribe_audio),
+                "voice_transcription_network_used": False,
             }
             if args.as_json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1008,7 +1064,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         except (
             ProbeError, SnapshotError, KeyInputError, DecryptionError,
-            ChatDataError, ExportError, OSError, sqlite3.DatabaseError,
+            ChatDataError, ExportError, VoiceRuntimeError,
+            OSError, sqlite3.DatabaseError,
         ) as exc:
             print(str(exc), file=sys.stderr)
             return 3
@@ -1064,6 +1121,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.include_assets and not args.confirm_copy_attachments:
             print("Separate confirmation is required to copy attachments.", file=sys.stderr)
             return 4
+        if args.transcribe_audio and not args.include_assets:
+            print("Voice transcription requires attachment export mode.", file=sys.stderr)
+            return 3
+        if args.transcribe_audio and not args.confirm_transcribe_audio:
+            print("Separate confirmation is required to transcribe selected voice content locally.", file=sys.stderr)
+            return 4
         if args.allow_remote_media_download and not args.confirm_remote_media_download:
             print("Separate confirmation is required for selected-media network downloads.", file=sys.stderr)
             return 4
@@ -1094,6 +1157,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ChatDataError("The start time must not be later than the end time.")
             media_resolver = None
             if args.include_assets:
+                voice_transcriber = _voice_transcriber_from_args(args)
                 if args.image_key_input:
                     image_key = prompt_image_key(args.image_key_input)
                 image_xor_key = args.image_xor_key
@@ -1119,6 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
                     include_emoticons=MessageKind.EMOTICON in scope.include,
                     allow_remote_media_download=args.allow_remote_media_download,
                     video_asset=args.video_asset,
+                    voice_transcriber=voice_transcriber,
                 )
             result = export_chat(
                 _dataset_from_args(args), scope, Path(args.output_dir),
@@ -1141,13 +1206,18 @@ def main(argv: list[str] | None = None) -> int:
                 },
                 "message_content_printed": False,
                 "video_asset": args.video_asset,
+                "voice_transcription_requested": bool(args.transcribe_audio),
+                "voice_transcription_network_used": False,
             }
             if args.as_json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
                 print(f"Exported {result.message_count} messages to {result.archive}")
             return 0
-        except (ChatDataError, ExportError, KeyInputError, ProbeError, OSError, sqlite3.DatabaseError) as exc:
+        except (
+            ChatDataError, ExportError, KeyInputError, ProbeError,
+            VoiceRuntimeError, OSError, sqlite3.DatabaseError,
+        ) as exc:
             print(str(exc), file=sys.stderr)
             return 3
         finally:

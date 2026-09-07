@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "platform": "Windows x64",
+  "whisper_cpp": {
+    "tag": "b4938",
+    "commit": "371b5a7561823ab2bb32142d2751e35e7534727b",
+    "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b4938/whisper-bin-x64.zip",
+    "sha256": "c2a4b60edb11f7e11a9191ffb50929535527d4d91c9903dbe3e554583bbbc63d"
+  },
+  "model": {
+    "name": "ggml-base.bin",
+    "source": "OpenAI Whisper multilingual base model converted for whisper.cpp",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+    "sha1": "465707469ff3a37a2b9b8d8f89f2f99de7299dac",
+    "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+  },
+  "silk_decoder": {
+    "repository": "https://github.com/kn007/silk-v3-decoder",
+    "commit": "507be6bca8ce1fb977a061481f1d79e8c610e309",
+    "url": "https://github.com/kn007/silk-v3-decoder/archive/507be6bca8ce1fb977a061481f1d79e8c610e309.zip",
+    "sha256": "5e4c662e9a2dc220156182972db4e20ed1351885aa69dc3566f90abc567cd4e9"
+  }
+}

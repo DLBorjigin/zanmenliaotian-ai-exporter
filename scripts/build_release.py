@@ -23,7 +23,7 @@ def _zip_tree(root: Path, destination: Path, prefix: str = "") -> None:
             archive.write(path, Path(prefix) / relative)
 
 
-def build(output: Path) -> list[Path]:
+def build(output: Path, voice_runtime: Path | None = None) -> list[Path]:
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     project_metadata = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -37,12 +37,23 @@ def build(output: Path) -> list[Path]:
         shutil.copy2(PROJECT_ROOT / "pyproject.toml", runtime / "pyproject.toml")
         shutil.copy2(PROJECT_ROOT / "THIRD_PARTY_NOTICES.md", runtime / "THIRD_PARTY_NOTICES.md")
         shutil.copytree(PROJECT_ROOT / "licenses", runtime / "licenses")
+        if voice_runtime is not None:
+            voice_runtime = voice_runtime.resolve(strict=True)
+            required = (
+                voice_runtime / "silk" / "silk-decoder.exe",
+                voice_runtime / "whisper" / "whisper-cli.exe",
+                voice_runtime / "models" / "ggml-base.bin",
+            )
+            missing = [str(path) for path in required if not path.is_file()]
+            if missing:
+                raise FileNotFoundError("Incomplete voice runtime: " + ", ".join(missing))
+            shutil.copytree(voice_runtime, runtime / "voice-runtime")
         skill_zip = output / "wechat-chat-export.zip"
         _zip_tree(skill_stage, skill_zip, "wechat-chat-export")
 
         source_stage = staging / "wechat-ai-exporter"
         for directory in (
-            ".github", "src", "skill", "scripts", "tests", "docs", "licenses"
+            ".github", "src", "skill", "scripts", "tests", "docs", "licenses", "vendor"
         ):
             shutil.copytree(PROJECT_ROOT / directory, source_stage / directory)
         for filename in (
@@ -79,6 +90,9 @@ def build(output: Path) -> list[Path]:
         "skill_name": "wechat-chat-export",
         "network_required": False,
         "optional_network_media_download": True,
+        "offline_voice_transcription_bundled": voice_runtime is not None,
+        "voice_transcription_engine": "whisper.cpp" if voice_runtime else None,
+        "voice_transcription_model": "ggml-base multilingual" if voice_runtime else None,
         "wechat_process_modified": False,
         "native_hook_bundled": False,
         "live_validated_weixin_versions": ["4.1.12.55", "4.1.13.12"],
@@ -108,6 +122,7 @@ def build(output: Path) -> list[Path]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--voice-runtime-dir", type=Path)
     args = parser.parse_args()
-    for artifact in build(args.output):
+    for artifact in build(args.output, args.voice_runtime_dir):
         print(artifact)
