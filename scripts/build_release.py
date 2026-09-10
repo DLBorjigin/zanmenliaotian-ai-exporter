@@ -95,7 +95,7 @@ def build(output: Path, voice_runtime: Path | None = None) -> list[Path]:
         "voice_transcription_model": "ggml-base multilingual" if voice_runtime else None,
         "wechat_process_modified": False,
         "native_hook_bundled": False,
-        "live_validated_weixin_versions": ["4.1.12.55", "4.1.13.12"],
+        "live_validated_weixin_versions": ["4.1.12.55", "4.1.13.12", "4.1.13.65"],
         "additional_read_only_adapters": ["4.1.10"],
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     primary = [skill_zip, source_zip, readme, release_notes, release_info, *copied_scripts]

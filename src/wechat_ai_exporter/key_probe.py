@@ -72,9 +72,13 @@ SUPPORTED_ADAPTERS = (
     MasterKeyAdapter("weixin-4.1.10-legacy", 0x130),
 )
 EXACT_SALT_ADAPTER = "weixin-4.1.13.12-exact-salt-config"
+EXACT_SALT_ADAPTERS = {
+    (4, 1, 13, 12): EXACT_SALT_ADAPTER,
+    (4, 1, 13, 65): "weixin-4.1.13.65-exact-salt-config",
+}
 READ_ONLY_PROBE_ADAPTER_NAMES = tuple(
     item.name for item in SUPPORTED_ADAPTERS
-) + (EXACT_SALT_ADAPTER,)
+) + tuple(EXACT_SALT_ADAPTERS.values())
 
 
 @dataclass(frozen=True)
@@ -449,7 +453,7 @@ def _candidate_wcdb_config_keys(pid: int, first_page: bytes,
         return
     base, module_size, dll_path = module
     if (
-        _version_from_module_path(dll_path) != (4, 1, 13, 12)
+        _version_from_module_path(dll_path) not in EXACT_SALT_ADAPTERS
         or not _file_contains(dll_path, EXACT_SALT_CONFIG_MARKER)
     ):
         return
@@ -666,15 +670,20 @@ def probe_database_key(database: Path, *, authorized: bool,
                 accepted = verify_first_page(candidate, first_page, WEIXIN4)
                 if not accepted:
                     continue
+                module = _weixin_module(pid)
+                adapter_name = EXACT_SALT_ADAPTERS.get(
+                    _version_from_module_path(module[2]) if module else None,
+                    EXACT_SALT_ADAPTER,
+                )
                 if not derive_media_key:
-                    return ProbeResult(candidate, EXACT_SALT_ADAPTER, pid, 0)
+                    return ProbeResult(candidate, adapter_name, pid, 0)
                 media_pids = [pid, *(item for item in pids if item != pid)]
                 for media_pid in media_pids:
                     for cfg_dword, image_key, image_xor_key in (
                         _candidate_image_keys_from_global_config(media_pid, deadline)
                     ):
                         return ProbeResult(
-                            candidate, EXACT_SALT_ADAPTER, pid, cfg_dword,
+                            candidate, adapter_name, pid, cfg_dword,
                             image_key=image_key, image_xor_key=image_xor_key,
                         )
                 accepted = False

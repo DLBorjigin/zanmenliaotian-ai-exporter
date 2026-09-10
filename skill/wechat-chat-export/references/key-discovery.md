@@ -25,7 +25,7 @@ passes the target database's SQLCipher page-HMAC check. It never writes to the
 Weixin process, injects a library, saves a memory dump, caches the key, or prints
 the account identifier.
 
-Weixin 4.1.13.12 stores independent serialized key-and-salt values for individual
+Weixin 4.1.13.12 and 4.1.13.65 store independent serialized key-and-salt values for individual
 WCDB databases. Its exact-version adapter locates the registered
 `com.Tencent.WCDB.Config.Cipher` configuration node, decodes only its bounded
 value, matches the selected database salt, and still requires the exact target
@@ -33,7 +33,7 @@ page-HMAC check. Do not replace this structured path with an unrestricted search
 for key-like byte sequences. Unknown versions remain unsupported until separately
 researched and validated.
 
-After the exact 4.1.13.12 database key has passed HMAC validation, a separately
+After the exact supported-build database key has passed HMAC validation, a separately
 authorized V2 image-key request may read the existing bounded `global_config`
 account fields through the known adapter offsets. The matching WCDB configuration
 and `global_config` may live in different child processes of the same running

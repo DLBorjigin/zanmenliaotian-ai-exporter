@@ -2,6 +2,7 @@ import hashlib
 import hmac
 from pathlib import Path
 import tempfile
+import struct
 import unittest
 from unittest import mock
 
@@ -13,6 +14,7 @@ from wechat_ai_exporter.key_probe import (
     _landmark_offsets,
     _owner_pointer_address, _version_from_module_path, EXACT_SALT_ADAPTER,
     MasterKeyAdapter, wait_for_manual_weixin_exit,
+    EXACT_SALT_ADAPTERS, EXACT_SALT_CONFIG_MARKER, CONFIG_CIPHER_XOR_MASK,
 )
 from wechat_ai_exporter.key_validation import PAGE_SIZE, SALT_SIZE, WEIXIN4, verify_first_page
 
@@ -35,6 +37,44 @@ def encrypted_page_for_master(master: bytes) -> tuple[bytes, bytes]:
 
 
 class KeyProbeTests(unittest.TestCase):
+    def test_registered_cipher_structure_for_both_supported_builds(self) -> None:
+        salt = bytes(range(16))
+        key = bytes(range(32))
+        serialized = b"x'" + key.hex().encode() + salt.hex().encode() + b"'"
+        blob = bytes(v ^ CONFIG_CIPHER_XOR_MASK[i % 32] for i, v in enumerate(serialized))
+        base, pair_address, config, data = 0x100000, 0x200000, 0x300000, 0x400000
+        image = b"prefix" + EXACT_SALT_CONFIG_MARKER
+        node = bytearray(0x50)
+        struct.pack_into('<Q', node, 0x28, config)
+        obj = bytearray(0x28)
+        struct.pack_into('<QQ', obj, 8, data, len(blob))
+        memory = {(base, len(image)): image, (pair_address - 0x10, 0x50): bytes(node),
+                  (config + 0x88, 0x28): bytes(obj), (data, len(blob)): blob}
+        for version in EXACT_SALT_ADAPTERS:
+            with self.subTest(version=version), mock.patch(
+                'wechat_ai_exporter.key_probe._weixin_module',
+                return_value=(base, len(image), Path('C:/Weixin') / '.'.join(map(str, version)) / 'Weixin.dll'),
+            ), mock.patch('wechat_ai_exporter.key_probe._file_contains', return_value=True), \
+                    mock.patch('wechat_ai_exporter.key_probe._open_reader',
+                               return_value=(1, lambda addr, size: memory.get((addr, size)))), \
+                    mock.patch('wechat_ai_exporter.key_probe._kernel32'), \
+                    mock.patch('wechat_ai_exporter.key_probe._process_memory_hits', return_value=iter([pair_address])):
+                found = list(_candidate_wcdb_config_keys(123, salt + b'0' * (PAGE_SIZE - 16), 10**12))
+                self.assertEqual(found, [bytearray(key)])
+
+    def test_unverified_candidate_is_rejected_and_wiped(self) -> None:
+        page, _ = encrypted_page_for_master(bytes(range(32)))
+        candidate = bytearray(b'z' * 32)
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / 'message.db'
+            database.write_bytes(page)
+            with mock.patch('wechat_ai_exporter.key_probe._process_ids', return_value=[123]), \
+                    mock.patch('wechat_ai_exporter.key_probe._candidate_master_keys', return_value=iter(())), \
+                    mock.patch('wechat_ai_exporter.key_probe._candidate_wcdb_config_keys', return_value=iter([candidate])):
+                with self.assertRaises(ProbeError):
+                    probe_database_key(database, authorized=True)
+        self.assertEqual(candidate, bytearray(32))
+
     def test_master_derives_key_for_exact_database_salt(self) -> None:
         master = bytes(range(32))
         page, expected = encrypted_page_for_master(master)

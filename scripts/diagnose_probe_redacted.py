@@ -7,7 +7,7 @@ import struct
 import time
 
 from wechat_ai_exporter.key_probe import (
-    EXACT_SALT_ADAPTER, SUPPORTED_ADAPTERS, _candidate_wcdb_config_keys,
+    EXACT_SALT_ADAPTER, EXACT_SALT_ADAPTERS, _version_from_module_path, SUPPORTED_ADAPTERS, _candidate_wcdb_config_keys,
     _landmark_offsets, _open_reader, _owner_pointer_address, _process_ids,
     _remote_std_string, _weixin_module, derive_database_key, extract_xor_material,
 )
@@ -111,7 +111,10 @@ def diagnose(database: Path) -> dict[str, object]:
         finally:
             import ctypes
             ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
-        exact_counts = adapters[EXACT_SALT_ADAPTER]
+        exact_name = EXACT_SALT_ADAPTERS.get(_version_from_module_path(dll_path), EXACT_SALT_ADAPTER)
+        exact_counts = adapters.setdefault(exact_name, {
+            "structured_candidates_found": 0, "database_key_validated": 0,
+        })
         assert isinstance(exact_counts, dict)
         for candidate in _candidate_wcdb_config_keys(pid, page, deadline):
             try:
