@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Package = "",
     [string]$ChecksumFile = "",
     [switch]$Quiet

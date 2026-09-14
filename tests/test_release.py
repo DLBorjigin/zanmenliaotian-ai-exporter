@@ -35,14 +35,14 @@ class ReleaseTests(unittest.TestCase):
                 cwd=project, capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(built.returncode, 0, built.stderr)
-            kit = output_parent / "GitHub上传材料-v1.0.8"
+            kit = output_parent / "GitHub上传材料-v1.0.9"
             repository = kit / "01-仓库源码"
-            bundle = kit / "02-Release附件" / "微信聊天导出工具-v1.0.8-Windows.zip"
+            bundle = kit / "02-Release附件" / "微信聊天导出工具-v1.0.9-Windows.zip"
             self.assertTrue((kit / "上传指南.md").is_file())
             self.assertTrue(bundle.is_file())
             self.assertFalse(any(repository.glob("*Windows.zip")))
             manifest = json.loads((kit / "材料清单.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["version"], "1.0.8")
+            self.assertEqual(manifest["version"], "1.0.9")
 
             with zipfile.ZipFile(bundle) as outer:
                 source_name = next(
@@ -87,8 +87,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertTrue((output / "双击卸载.cmd").is_file())
             self.assertTrue((output / "双击恢复上一版本.cmd").is_file())
             self.assertTrue((output / "版本信息.json").is_file())
-            self.assertTrue((output / "发布说明-v1.0.8.md").is_file())
-            self.assertTrue((output / "微信聊天导出工具-v1.0.8-Windows.zip").is_file())
+            self.assertTrue((output / "发布说明-v1.0.9.md").is_file())
+            self.assertTrue((output / "微信聊天导出工具-v1.0.9-Windows.zip").is_file())
             self.assertTrue((output / "发行包SHA256.txt").is_file())
             with zipfile.ZipFile(skill_zip) as archive:
                 names = archive.namelist()
@@ -111,7 +111,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             payload = json.loads(run.stdout)
             self.assertEqual(payload["status"], "runtime_ready")
-            self.assertEqual(payload["version"], "1.0.8")
+            self.assertEqual(payload["version"], "1.0.9")
             self.assertTrue(payload["offline_voice_transcription"]["available"])
             info = json.loads((output / "版本信息.json").read_text(encoding="utf-8"))
             self.assertIn("4.1.13.12", info["live_validated_weixin_versions"])
@@ -144,6 +144,12 @@ class ReleaseTests(unittest.TestCase):
             env = dict(os.environ)
             env["CODEX_HOME"] = str(root / "codex-home")
             install = output / "安装工具.ps1"
+            for name in ("安装工具.ps1", "恢复上一版本.ps1", "卸载工具.ps1"):
+                data = (output / name).read_bytes()
+                self.assertTrue(data.startswith(b'\xef\xbb\xbf'), name)
+                self.assertIn('param(', data.decode('utf-8-sig'))
+            for name in ("install_skill.ps1", "restore_skill.ps1", "uninstall_skill.ps1"):
+                self.assertTrue((project / 'scripts' / name).read_bytes().startswith(b'\xef\xbb\xbf'), name)
             for _ in range(2):
                 run = subprocess.run(
                     ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",

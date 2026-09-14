@@ -79,7 +79,16 @@ def build(output: Path, voice_runtime: Path | None = None) -> list[Path]:
     copied_scripts = []
     for source_name, release_name in script_names.items():
         destination = output / release_name
-        shutil.copy2(PROJECT_ROOT / "scripts" / source_name, destination)
+        source = PROJECT_ROOT / "scripts" / source_name
+        if source.suffix == ".ps1":
+            # Windows PowerShell 5.1 otherwise interprets Chinese as ANSI.
+            destination.write_text(source.read_text(encoding="utf-8-sig"),
+                                   encoding="utf-8-sig", newline="\r\n")
+        elif source.suffix == ".cmd":
+            destination.write_text(source.read_text(encoding="utf-8-sig"),
+                                   encoding="utf-8", newline="\r\n")
+        else:
+            shutil.copy2(source, destination)
         copied_scripts.append(destination)
     release_info = output / "版本信息.json"
     release_info.write_text(json.dumps({
