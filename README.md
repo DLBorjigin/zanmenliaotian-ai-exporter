@@ -1,6 +1,7 @@
 # 微信聊天记录 AI 导出工具
 
 当前公开版本：**v1.0.9**。
+依旧：欢迎通过这里/小红书nTengerKhukhT/邮箱dulaanBorjigin@outlook.com肘我:D
 
 这是一个面向非技术用户的 Windows Codex Skill，用于在用户明确授权后，按聊天、
 时间和消息类型只读导出本人电脑上的微信聊天记录。默认本地处理，不修改微信数据。
