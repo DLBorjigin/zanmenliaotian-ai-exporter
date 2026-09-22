@@ -16,6 +16,3 @@ dulaanBorjigin@outlook.com/nTengerKhukhT(小红书id)。
 [中文使用说明](README.zh-CN.md)。v1.0.10 自带 Windows x64 离线 SILK 语音解码、
 whisper.cpp 和多语言 base 模型。tag 源码与发行包内附源码一致；第三方组件的固定版本、
 来源和校验值记录在 `vendor/voice-runtime.json`。
-
-如需反馈问题，可使用 GitHub Issues，或联系维护者：
-`dulaanBorjigin@outlook.com`。
