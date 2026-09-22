@@ -75,6 +75,7 @@ EXACT_SALT_ADAPTER = "weixin-4.1.13.12-exact-salt-config"
 EXACT_SALT_ADAPTERS = {
     (4, 1, 13, 12): EXACT_SALT_ADAPTER,
     (4, 1, 13, 65): "weixin-4.1.13.65-exact-salt-config",
+    (4, 1, 15, 13): "weixin-4.1.15.13-exact-salt-config",
 }
 READ_ONLY_PROBE_ADAPTER_NAMES = tuple(
     item.name for item in SUPPORTED_ADAPTERS
