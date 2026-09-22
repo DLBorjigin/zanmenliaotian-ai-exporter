@@ -2,6 +2,9 @@
 
 当前公开版本：**v1.0.10**。
 
+如需反馈问题，可使用 GitHub Issues，或联系维护者：
+dulaanBorjigin@outlook.com/nTengerKhukhT(小红书id)。
+
 这是一个面向非技术用户的 Windows Codex Skill，用于在用户明确授权后，按聊天、
 时间和消息类型只读导出本人电脑上的微信聊天记录。默认本地处理，不修改微信数据。
 
