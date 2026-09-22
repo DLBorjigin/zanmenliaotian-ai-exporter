@@ -1,6 +1,6 @@
 # 微信聊天记录 AI 导出工具
 
-当前公开版本：**v1.0.10**。
+当前公开版本：**v1.0.10**。(可适配微信4.1.15.13）。
 
 如需反馈问题，可使用 GitHub Issues，或联系维护者：
 dulaanBorjigin@outlook.com/nTengerKhukhT(小红书id)。
