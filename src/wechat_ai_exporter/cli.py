@@ -444,7 +444,31 @@ def _auto_plaintext_bundle(sources: dict[str, Path], snapshot_root: Path,
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    contacts = sub.add_parser('export-contacts-auto-key', help='Export conservatively filtered local friends; mutual friendship is unverified.')
+    contacts.add_argument('--scope', choices=('friends','all'), default='friends')
+    contacts.add_argument('--contact-database', required=True)
+    contacts.add_argument('--output-dir', required=True)
+    contacts.add_argument('--confirm-read-process-memory', action='store_true')
+    contacts.add_argument('--confirm-export-contacts', action='store_true')
+    args = parser.parse_args(argv)
+    if args.command == 'export-contacts-auto-key':
+        if not (args.confirm_read_process_memory and args.confirm_export_contacts):
+            print('Contact export and exact database memory access require confirmation.', file=sys.stderr)
+            return 4
+        import tempfile
+        from .contacts import export_contacts
+        try:
+            with tempfile.TemporaryDirectory(prefix='wechat-contacts-') as temp:
+                root=Path(temp)
+                with _auto_plaintext_bundle({'contact':Path(args.contact_database)},root/'snapshots',root/'plain',20) as (plain, *_):
+                    result=export_contacts(plain['contact'],Path(args.output_dir),scope=args.scope)
+            print(json.dumps(result,ensure_ascii=False,indent=2))
+            return 0
+        except (OSError, ValueError, sqlite3.DatabaseError, ChatDataError, ProbeError, SnapshotError, DecryptionError) as exc:
+            print('Contact export failed: '+type(exc).__name__+'. No successful export was reported.',file=sys.stderr)
+            return 3
     if args.command == "doctor":
         payload = _doctor_payload()
         if args.as_json:

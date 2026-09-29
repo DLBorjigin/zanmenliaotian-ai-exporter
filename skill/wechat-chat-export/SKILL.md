@@ -1,9 +1,13 @@
 ---
 name: wechat-chat-export
-description: Locate, inspect, filter, and locally package authorized WeChat for Windows chat history for AI use. Use when a user wants to export selected conversations, dates, or attachment types; do not use to access another person's account or to modify WeChat data.
+description: Locally export authorized WeChat for Windows chat history or contact lists. Use for selected conversations, dates, attachment types, or contact metadata; do not access another person's account or modify WeChat data.
 ---
 
 # WeChat Chat Export
+
+For contact-list export, read [references/contacts.md](references/contacts.md).
+Use the contact-only workflow without opening message databases, and never
+equate local contact records with a verified friend list.
 
 Give nontechnical users a local, read-only workflow. The user chooses the account,
 conversation, time range, message types, and whether attachments may be copied.
