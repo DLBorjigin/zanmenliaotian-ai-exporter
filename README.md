@@ -1,4 +1,5 @@
 # 微信聊天记录 AI 导出工具
+依旧：欢迎在这里/邮箱DulaanBorjigin@outlook.com/小红书NLD721肘我。
 
 当前公开版本：**v1.0.14**。
 
