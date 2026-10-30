@@ -1,0 +1,60 @@
+name: "问题报告"
+description: "报告安装、发现、兼容性或导出问题；不要上传聊天数据或密钥"
+title: "[Bug] "
+labels:
+  - "bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请勿上传微信数据库、聊天正文、密钥、内存内容、账号标识或完整私人路径。
+  - type: input
+    id: tool_version
+    attributes:
+      label: "工具版本"
+      placeholder: "例如 1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: weixin_version
+    attributes:
+      label: "微信/Weixin 版本"
+      placeholder: "例如 4.1.12.55"
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: "出现问题的阶段"
+      options:
+        - "安装或更新"
+        - "首次环境检查"
+        - "发现微信位置"
+        - "只读密钥验证"
+        - "数量预览"
+        - "正式导出"
+        - "附件或媒体"
+        - "恢复或卸载"
+        - "其他"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: "问题描述"
+      description: "说明你做了什么、期望什么、实际发生了什么。请先删除私人路径和聊天内容。"
+    validations:
+      required: true
+  - type: textarea
+    id: redacted_error
+    attributes:
+      label: "脱敏错误信息"
+      description: "只粘贴不含账号、路径、正文、密钥或数据库内容的错误。"
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: "隐私确认"
+      options:
+        - label: "我确认没有上传数据库、聊天内容、密钥、账号标识或完整私人路径。"
+          required: true
