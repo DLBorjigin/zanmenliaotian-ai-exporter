@@ -76,6 +76,10 @@ EXACT_SALT_ADAPTERS = {
     (4, 1, 13, 12): EXACT_SALT_ADAPTER,
     (4, 1, 13, 65): "weixin-4.1.13.65-exact-salt-config",
     (4, 1, 15, 13): "weixin-4.1.15.13-exact-salt-config",
+    (4, 1, 15, 55): "weixin-4.1.15.55-exact-salt-config",
+    (4, 1, 15, 56): "weixin-4.1.15.56-exact-salt-config",
+    # Validated with target-page HMAC, stable snapshots, WAL and schema checks.
+    (4, 2, 0, 13): "weixin-4.2.0.13-exact-salt-config",
 }
 READ_ONLY_PROBE_ADAPTER_NAMES = tuple(
     item.name for item in SUPPORTED_ADAPTERS
@@ -641,6 +645,39 @@ def probe_database_key(database: Path, *, authorized: bool,
     pids = _process_ids()
     if not pids:
         raise ProbeError("No running Weixin.exe process was found; sign in to WeChat first.")
+    # Exact registered-config adapters avoid spending the budget on legacy paths.
+    for pid in pids:
+        for candidate in _candidate_wcdb_config_keys(pid, first_page, deadline):
+            accepted = False
+            try:
+                if not verify_first_page(candidate, first_page, WEIXIN4):
+                    continue
+                module = _weixin_module(pid)
+                adapter_name = EXACT_SALT_ADAPTERS.get(
+                    _version_from_module_path(module[2]) if module else None,
+                    EXACT_SALT_ADAPTER,
+                )
+                if not derive_media_key:
+                    accepted = True
+                    return ProbeResult(candidate, adapter_name, pid, 0)
+                media_pids = [pid, *(item for item in pids if item != pid)]
+                for media_pid in media_pids:
+                    for cfg_dword, image_key, image_xor_key in (
+                        _candidate_image_keys_from_global_config(media_pid, deadline)
+                    ):
+                        accepted = True
+                        return ProbeResult(
+                            candidate, adapter_name, pid, cfg_dword,
+                            image_key=image_key, image_xor_key=image_xor_key,
+                        )
+                accepted = False
+            finally:
+                if not accepted:
+                    wipe_key(candidate)
+        if time.monotonic() > deadline:
+            raise ProbeError(
+                "The bounded read-only scan reached its time limit without a verified key."
+            )
     for pid in pids:
         for adapter in SUPPORTED_ADAPTERS:
             for master, cfg_dword, image_key, image_xor_key in _candidate_master_keys(
@@ -664,37 +701,6 @@ def probe_database_key(database: Path, *, authorized: bool,
                             wipe_key(image_key)
             if time.monotonic() > deadline:
                 raise ProbeError("The bounded read-only scan reached its time limit without a verified key.")
-    for pid in pids:
-        for candidate in _candidate_wcdb_config_keys(pid, first_page, deadline):
-            accepted = False
-            try:
-                accepted = verify_first_page(candidate, first_page, WEIXIN4)
-                if not accepted:
-                    continue
-                module = _weixin_module(pid)
-                adapter_name = EXACT_SALT_ADAPTERS.get(
-                    _version_from_module_path(module[2]) if module else None,
-                    EXACT_SALT_ADAPTER,
-                )
-                if not derive_media_key:
-                    return ProbeResult(candidate, adapter_name, pid, 0)
-                media_pids = [pid, *(item for item in pids if item != pid)]
-                for media_pid in media_pids:
-                    for cfg_dword, image_key, image_xor_key in (
-                        _candidate_image_keys_from_global_config(media_pid, deadline)
-                    ):
-                        return ProbeResult(
-                            candidate, adapter_name, pid, cfg_dword,
-                            image_key=image_key, image_xor_key=image_xor_key,
-                        )
-                accepted = False
-            finally:
-                if not accepted:
-                    wipe_key(candidate)
-        if time.monotonic() > deadline:
-            raise ProbeError(
-                "The bounded read-only scan reached its time limit without a verified key."
-            )
     raise ProbeError(
         "No supported adapter produced a key that validates the selected database. "
         "This WeChat build may need a new read-only adapter."

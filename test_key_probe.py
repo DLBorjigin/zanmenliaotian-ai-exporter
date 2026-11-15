@@ -37,6 +37,17 @@ def encrypted_page_for_master(master: bytes) -> tuple[bytes, bytes]:
 
 
 class KeyProbeTests(unittest.TestCase):
+    def setUp(self):
+        # Synthetic probe tests must never fall through to the real Win32 APIs.
+        for target, options in (
+            ("wechat_ai_exporter.key_probe._kernel32", {
+                "side_effect": AssertionError("Live process APIs are blocked in unit tests")}),
+            ("wechat_ai_exporter.key_probe._weixin_module", {"return_value": None}),
+        ):
+            patcher = mock.patch(target, **options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_registered_cipher_structure_for_both_supported_builds(self) -> None:
         salt = bytes(range(16))
         key = bytes(range(32))

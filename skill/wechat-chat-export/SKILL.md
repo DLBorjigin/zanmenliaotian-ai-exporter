@@ -5,6 +5,12 @@ description: Locally export authorized WeChat for Windows chat history or contac
 
 # WeChat Chat Export
 
+Weixin 4.2.0.13 database-key discovery and message export have been validated
+on Windows 11 x64. Run `scripts/wechat_export.py doctor --json` to verify the
+actual runtime version and adapter list; root-level source copies alone do not
+establish which adapter the installed skill uses. Media-key discovery and voice
+transcription are not live-validated on this build.
+
 For contact-list export, read [references/contacts.md](references/contacts.md).
 Use the contact-only workflow without opening message databases, and never
 equate local contact records with a verified friend list.
